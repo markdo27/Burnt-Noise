@@ -329,6 +329,7 @@ uniform float uWarp;
 uniform float uWarpScale;
 uniform vec2  uDragDir;
 uniform float uContentAlpha;
+uniform float uDither;      // 1.0 only on the 8-bit fallback path
 uniform float uTime;
 uniform float uSeed;
 
@@ -365,6 +366,12 @@ void main(){
      trail that the brush drags and time decays. */
   float inject = fresh * clamp(influence, 0.0, 1.0) * uContentAlpha;
   float result = max(advected * uPersistence, inject);
+
+  /* 8-bit fallback only: a sub-LSB dither breaks up the staircase that
+     repeated quantised decay would otherwise etch into the trail. Harmless
+     no-op when the buffer is half-float. */
+  result += (hash21(gl_FragCoord.xy + uSeed) - 0.5) * uDither * (1.0 / 255.0);
+
   gl_FragColor = vec4(vec3(result), result);
 }`;
 
@@ -401,6 +408,45 @@ void main(){
   sum += texture2D(tSrc, vUv - o * 4.0) * w4;
 
   gl_FragColor = sum;
+}`;
+
+/* ═══════ PASS B1 — PYRAMID DOWNSAMPLE ═════════════════════════════════════
+   Exact 2x box reduction: the four source texels that cover the destination
+   texel, sampled at +-half a source texel. Cheap, alias-free, and the basis
+   of the multi-scale glow.
+   ═══════════════════════════════════════════════════════════════════════ */
+const FRAG_DOWN = `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tSrc;
+uniform vec2 uSrcTexel;
+void main(){
+  vec2 o = uSrcTexel * 0.5;
+  vec4 s  = texture2D(tSrc, vUv + vec2( o.x,  o.y));
+  s      += texture2D(tSrc, vUv + vec2(-o.x,  o.y));
+  s      += texture2D(tSrc, vUv + vec2( o.x, -o.y));
+  s      += texture2D(tSrc, vUv + vec2(-o.x, -o.y));
+  gl_FragColor = s * 0.25;
+}`;
+
+/* ═══════ PASS B2 — PYRAMID COMBINE ════════════════════════════════════════
+   Sum the blurred levels back into one glow field. Each level was blurred by
+   the same radius in ITS OWN texels, so in screen space level i spans about
+   2^(i+1) times as far — one pass yields a tight rim and a wide halo at once.
+   ═══════════════════════════════════════════════════════════════════════ */
+const FRAG_COMBINE = `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D t0, t1, t2, t3;
+uniform vec4  uW;
+uniform float uGain;
+void main(){
+  float a = texture2D(t0, vUv).a * uW.x
+          + texture2D(t1, vUv).a * uW.y
+          + texture2D(t2, vUv).a * uW.z
+          + texture2D(t3, vUv).a * uW.w;
+  a *= uGain;
+  gl_FragColor = vec4(vec3(a), a);
 }`;
 
 /* ═══════ PASS C — THERMAL GRADIENT MAP ═════════════════════════════════════
@@ -657,16 +703,69 @@ void main(){
    3. MINIMAL WEBGL HELPER
    ═══════════════════════════════════════════════════════════════════════ */
 const canvas = document.getElementById('gl');
-const gl = canvas.getContext('webgl', {
+const CTX_OPTS = {
   antialias:false,
   preserveDrawingBuffer:true,   // required so toBlob() can read the post-processed buffer
   alpha:false,
   premultipliedAlpha:false
-}) || canvas.getContext('experimental-webgl');
+};
+/* WebGL2 first — purely for its texture formats (RGBA16F). The shaders stay
+   GLSL ES 1.00, which a WebGL2 context accepts unchanged, so this is a free
+   upgrade with a clean WebGL1 fallback. */
+const gl = canvas.getContext('webgl2', CTX_OPTS)
+        || canvas.getContext('webgl', CTX_OPTS)
+        || canvas.getContext('experimental-webgl', CTX_OPTS);
 
 if (!gl){ document.getElementById('fatal').style.display = 'grid'; throw new Error('no webgl'); }
 
+const IS_GL2  = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
 const MAX_TEX = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+
+/* ── Render-target pixel formats ──────────────────────────────────────────
+   The fluid buffer is a FEEDBACK loop: every frame re-reads its own previous
+   output and multiplies by Persistence. At 8 bits that's 1/255 quantisation
+   compounding each step, so trails visibly band and die early (0.93^n snaps
+   to zero long before the maths says it should). A half-float target removes
+   that ceiling entirely and is the single biggest quality win available.
+   Falls back to 8-bit + dithering where unsupported.                      */
+const FMT_8 = { internal: gl.RGBA, format: gl.RGBA, type: gl.UNSIGNED_BYTE };
+
+function probeHalfFloat(){
+  if (IS_GL2){
+    // Renderability must be asked for explicitly even in WebGL2.
+    if (!gl.getExtension('EXT_color_buffer_float') &&
+        !gl.getExtension('EXT_color_buffer_half_float')) return null;
+    return { internal: gl.RGBA16F, format: gl.RGBA, type: gl.HALF_FLOAT };
+  }
+  const oes = gl.getExtension('OES_texture_half_float');
+  if (!oes) return null;
+  // Without LINEAR filtering the blur/upsample chain is useless, so require it.
+  if (!gl.getExtension('OES_texture_half_float_linear')) return null;
+  gl.getExtension('EXT_color_buffer_half_float');
+  return { internal: gl.RGBA, format: gl.RGBA, type: oes.HALF_FLOAT_OES };
+}
+
+/** Don't trust extension presence alone — actually build a 4x4 FBO with the
+    format and ask the driver whether it's complete. */
+function formatRenderable(fmt){
+  if (!fmt) return false;
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, fmt.internal, 4, 4, 0, fmt.format, fmt.type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(f); gl.deleteTexture(t);
+  return ok;
+}
+
+const FMT_HDR_CANDIDATE = probeHalfFloat();
+const HDR_OK  = formatRenderable(FMT_HDR_CANDIDATE);
+const FMT_HDR = HDR_OK ? FMT_HDR_CANDIDATE : FMT_8;
 
 function compile(type, src){
   const s = gl.createShader(type);
@@ -712,6 +811,8 @@ gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
 const progFluid   = program(VERT, FRAG_FLUID);
 const progBlur    = program(VERT, FRAG_BLUR);
+const progDown    = program(VERT, FRAG_DOWN);
+const progCombine = program(VERT, FRAG_COMBINE);
 const progThermal = program(VERT, FRAG_THERMAL);
 const progPost    = program(VERT, FRAG_POST);
 
@@ -725,17 +826,23 @@ function makeTex(){
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   return t;
 }
-function makeRT(){ return { tex: makeTex(), fbo: gl.createFramebuffer() }; }
-function resizeRT(rt, w, h){
+function makeRT(){ return { tex: makeTex(), fbo: gl.createFramebuffer(), w:0, h:0 }; }
+function resizeRT(rt, w, h, fmt){
+  fmt = fmt || FMT_8;
+  rt.w = w; rt.h = h;
   gl.bindTexture(gl.TEXTURE_2D, rt.tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texImage2D(gl.TEXTURE_2D, 0, fmt.internal, w, h, 0, fmt.format, fmt.type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rt.tex, 0);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 function clearRT(rt){
   gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
-  gl.viewport(0, 0, bufW, bufH);
+  gl.viewport(0, 0, rt.w, rt.h);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -743,13 +850,41 @@ function clearRT(rt){
 
 const rtFluid = [makeRT(), makeRT()];   // persistent ping-pong — NOT recreated per frame
 let fluidFront = 0;
-const rtBlurA = makeRT();
-const rtBlurB = makeRT();
-const rtScene = makeRT();
+const rtGlow  = makeRT();               // combined multi-scale glow
+const rtScene = makeRT();               // finished artwork (8-bit is fine, it's final colour)
+
+/* Glow pyramid: PYR levels at 1/2, 1/4, 1/8, 1/16 of sim resolution.
+   Blurring a fixed small radius at each level costs almost nothing but
+   spans a huge range of screen-space radii, which is what gives a real
+   radiant falloff instead of one flat single-scale halo. */
+const PYR = 4;
+const rtPyrA = [], rtPyrB = [];
+for (let i = 0; i < PYR; i++){ rtPyrA.push(makeRT()); rtPyrB.push(makeRT()); }
+
+/* The simulation runs at a bounded resolution rather than the full drawing
+   buffer. The fluid is a smooth field so it upsamples cleanly, the crisp
+   core comes from the full-res mask anyway, and it keeps a 4200px export
+   from allocating hundreds of MB — while making export match preview. */
+const MAX_SIM = 1400;
+let simW = 0, simH = 0;
+
+function simSizeFor(w, h){
+  const k = Math.min(1, MAX_SIM / Math.max(w, h));
+  return [Math.max(2, Math.round(w * k)), Math.max(2, Math.round(h * k))];
+}
 
 function resizeAllRT(w, h){
-  resizeRT(rtFluid[0], w, h); resizeRT(rtFluid[1], w, h);
-  resizeRT(rtBlurA, w, h); resizeRT(rtBlurB, w, h); resizeRT(rtScene, w, h);
+  [simW, simH] = simSizeFor(w, h);
+  resizeRT(rtFluid[0], simW, simH, FMT_HDR);
+  resizeRT(rtFluid[1], simW, simH, FMT_HDR);
+  resizeRT(rtGlow,     simW, simH, FMT_HDR);
+  for (let i = 0; i < PYR; i++){
+    const lw = Math.max(1, simW >> (i + 1));
+    const lh = Math.max(1, simH >> (i + 1));
+    resizeRT(rtPyrA[i], lw, lh, FMT_HDR);
+    resizeRT(rtPyrB[i], lw, lh, FMT_HDR);
+  }
+  resizeRT(rtScene, w, h, FMT_8);
 }
 function resetFluid(){
   clearRT(rtFluid[0]); clearRT(rtFluid[1]);
@@ -1064,8 +1199,13 @@ function setBufferSize(w, h){
   resetFluid();
   drawPoster(w, h);
   drawHeroMask(w, h);
+  updateHud();
+}
+
+function updateHud(){
   document.getElementById('hudTxt').textContent =
-    `${P.aspect} · ${w}×${h} · SEED ${P.seed.toFixed(1)}`;
+    `${P.aspect} · ${bufW}×${bufH} · SIM ${simW}×${simH} · ` +
+    `${IS_GL2 ? 'GL2' : 'GL1'}/${HDR_OK ? 'F16' : 'U8'} · SEED ${P.seed.toFixed(1)}`;
 }
 
 /** One fluid-sim step. Callable both from the live render loop and from
@@ -1076,13 +1216,15 @@ function stepFluid(t){
 
   const src = rtFluid[fluidFront];
   const dst = rtFluid[1 - fluidFront];
+  const simAR = simW / simH;
   gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
-  gl.viewport(0, 0, bufW, bufH);
+  gl.viewport(0, 0, simW, simH);
   gl.useProgram(progFluid);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex); i1(progFluid,'tPrev',0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex); i1(progFluid,'tMask',1);
-  f1(progFluid,'uAspect', bufW/bufH);
-  f2(progFluid,'uBrush', flow.brush.x * (bufW/bufH), flow.brush.y);
+  f1(progFluid,'uDither', HDR_OK ? 0 : 1);
+  f1(progFluid,'uAspect', simAR);
+  f2(progFluid,'uBrush', flow.brush.x * simAR, flow.brush.y);
   f1(progFluid,'uBrushRadius', P.brushRadius);
   f1(progFluid,'uSmear', P.smearIntensity);
   f1(progFluid,'uPersistence', P.burnOn ? P.persistence : 0.0);
@@ -1103,27 +1245,60 @@ function renderFrame(){
   if (P.burnOn && P.playing) stepFluid(phase);
   else if (!P.burnOn) stepFluid(phase);   // keeps buffer decaying to plain mask (persistence forced 0 above)
 
-  /* ── PASS B: blur / glow — ping-pong H,V,H,V ─────────────────────────── */
-  const unitScale = bufH / POSTER_UNIT;
-  const radiusPx = Math.max(0, P.glowSoftness) * unitScale;
-  gl.useProgram(progBlur);
-  f1(progBlur,'uRadius', radiusPx);
-  f2(progBlur,'uTexel', 1 / bufW, 1 / bufH);
+  /* ── PASS B: multi-scale glow pyramid ─────────────────────────────────
+     Build 4 successively halved levels, blur each by the same radius in its
+     own texels, then sum them. Because level i's texels are 2^(i+1) screen
+     pixels wide, one fixed radius yields a tight rim AND a wide halo in the
+     same pass — the thing a single-scale blur structurally cannot do, and
+     cheaper than one very wide blur because most work happens at low res. */
   const fluidTex = rtFluid[fluidFront].tex;
-  const chain = [
-    [fluidTex,     rtBlurA, [1,0]],
-    [rtBlurA.tex,  rtBlurB, [0,1]],
-    [rtBlurB.tex,  rtBlurA, [1,0]],
-    [rtBlurA.tex,  rtBlurB, [0,1]],
-  ];
-  for (const [srcTex, dst, d] of chain){
-    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
-    gl.viewport(0, 0, bufW, bufH);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex); i1(progBlur,'tSrc',0);
-    f2(progBlur,'uDir', d[0], d[1]);
+  const levelRadius = Math.max(0.4, P.glowSoftness * 0.14);
+
+  let downSrc = rtFluid[fluidFront];
+  for (let i = 0; i < PYR; i++){
+    const a = rtPyrA[i], b = rtPyrB[i];
+
+    // downsample previous level -> a
+    gl.useProgram(progDown);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo);
+    gl.viewport(0, 0, a.w, a.h);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, downSrc.tex); i1(progDown,'tSrc',0);
+    f2(progDown,'uSrcTexel', 1 / downSrc.w, 1 / downSrc.h);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // separable blur at this level: a -> b (H), b -> a (V)
+    gl.useProgram(progBlur);
+    f1(progBlur,'uRadius', levelRadius);
+    f2(progBlur,'uTexel', 1 / a.w, 1 / a.h);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, b.fbo);
+    gl.viewport(0, 0, b.w, b.h);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, a.tex); i1(progBlur,'tSrc',0);
+    f2(progBlur,'uDir', 1, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo);
+    gl.viewport(0, 0, a.w, a.h);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, b.tex); i1(progBlur,'tSrc',0);
+    f2(progBlur,'uDir', 0, 1);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    downSrc = a;
   }
-  const glowTex = rtBlurB.tex;
+
+  // combine levels -> rtGlow
+  gl.useProgram(progCombine);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rtGlow.fbo);
+  gl.viewport(0, 0, rtGlow.w, rtGlow.h);
+  for (let i = 0; i < PYR; i++){
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, rtPyrA[i].tex);
+    i1(progCombine, 't' + i, i);
+  }
+  gl.uniform4f(loc(progCombine,'uW'), 0.35, 0.28, 0.22, 0.15);
+  f1(progCombine,'uGain', 1.7);   // compensates for energy spread across levels
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  const glowTex = rtGlow.tex;
 
   /* ── PASS C: thermal gradient map ─────────────────────────────────────── */
   gl.bindFramebuffer(gl.FRAMEBUFFER, rtScene.fbo);
@@ -1517,7 +1692,7 @@ const ACTIONS = {
   seed(){
     P.seed = Math.random() * 500;
     resetFluid();
-    document.getElementById('hudTxt').textContent = `${P.aspect} · ${bufW}×${bufH} · SEED ${P.seed.toFixed(1)}`;
+    updateHud();
   },
   all(){
     ACTIONS.seed();
