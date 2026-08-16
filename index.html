@@ -223,7 +223,8 @@ const P = {
   assetScale:1.0,
   edgeBlur:2,
   customFontHero:null,      // font-family name once a custom font is loaded, else null
-  contentCycleSpeed:8,
+  contentCycleSpeed:8,      // downward reveal/erase sweep rate
+  sweepSoftness:0.14,       // feather on the sweep edges (0 = hard wipe line)
 
   // ── Fluid & Interaction ──
   playing:true,
@@ -270,6 +271,25 @@ void main(){
   vUv = aPos * 0.5 + 0.5;          // vUv.y = 0 at BOTTOM of frame, 1 at TOP
   gl_Position = vec4(aPos, 0.0, 1.0);
 }`;
+
+/* ─── Content sweep (injected into the fluid + thermal passes only) ────────
+   Spatial reveal/erase wipe rather than a flat global fade. Both edges
+   travel top -> bottom: the reveal edge descends to bring the content in,
+   then the erase edge follows it down to take it away. The +-soft padding
+   pushes the lines just past the frame at p=0 and p=1 so the extremes are
+   genuinely "nothing shown" and "everything shown" rather than stopping a
+   half soft-edge short. vUv.y is 0 at the BOTTOM of the frame.        */
+const SWEEP = `
+float sweepLine(float p, float soft){ return 1.0 + soft - p * (1.0 + 2.0 * soft); }
+float contentSweep(float y, float reveal, float hide, float soft){
+  soft = max(soft, 0.0005);
+  float lr = sweepLine(reveal, soft);
+  float lh = sweepLine(hide,   soft);
+  float r = smoothstep(lr - soft, lr + soft, y);          // shown above the reveal edge
+  float h = 1.0 - smoothstep(lh - soft, lh + soft, y);    // erased above the erase edge
+  return clamp(r * h, 0.0, 1.0);
+}
+`;
 
 /* ─── Shared noise toolkit (injected into every fragment shader) ─────────── */
 const NOISE = `
@@ -328,12 +348,13 @@ uniform float uPersistence;
 uniform float uWarp;
 uniform float uWarpScale;
 uniform vec2  uDragDir;
-uniform float uContentAlpha;
+uniform float uSweepReveal, uSweepHide, uSweepSoft;
 uniform float uDither;      // 1.0 only on the 8-bit fallback path
 uniform float uTime;
 uniform float uSeed;
 
 ${NOISE}
+${SWEEP}
 
 void main(){
   vec2 uv = vUv;
@@ -350,22 +371,33 @@ void main(){
   float dist = length(P - uBrush);
   float influence = exp(-pow(dist / max(uBrushRadius, 0.001), 2.0));
 
-  vec2 flow = (uDragDir + turb) * uSmear * (0.22 + influence * 1.6);
+  /* THE ECHO FIX, PART 1 — step size.
+     Advection must move the field by a SMALL fraction of the frame per
+     step or the simulation stops being continuous. Unscaled, a Smear of
+     0.14 displaced ~25% of the poster every single frame, so each frame's
+     re-injected shape landed a quarter-screen below the last one and the
+     trail read as a ladder of discrete copies. FLOW_STEP brings a step
+     down to ~1% of the frame, so material flows instead of teleporting. */
+  const float FLOW_STEP = 0.03;
+  vec2 flow = (uDragDir + turb) * uSmear * (0.22 + influence * 1.6) * FLOW_STEP;
   vec2 srcUV = clamp(uv - vec2(flow.x / uAspect, flow.y), 0.0, 1.0);
 
   float advected = texture2D(tPrev, srcUV).a;
   float fresh    = texture2D(tMask, uv).a;
 
-  /* Injection is weighted by brush influence rather than stamped at full
-     strength everywhere every frame — an unconditional full-strength
-     stamp every frame would re-seed a complete, undragged copy of the
-     shape each frame, which (combined with a periodic auto-sweep) reads
-     as repeating stroboscoped copies rather than one continuous melt.
-     The always-visible crisp core is handled separately downstream (Pass
-     C samples the raw mask directly); this buffer is purely the fluid
-     trail that the brush drags and time decays. */
-  float inject = fresh * clamp(influence, 0.0, 1.0) * uContentAlpha;
-  float result = max(advected * uPersistence, inject);
+  /* THE ECHO FIX, PART 2 — additive inflow instead of max().
+     max(advected, inject) let a fresh stamp win outright at full strength,
+     so the source shape re-printed itself every frame and could never be
+     carried away — it stacked. Accumulating instead lets the brush feed
+     material that advection then drags off as one continuous ribbon.
+     Scaling inflow by (1 - persistence) keeps steady-state brightness
+     stable when Persistence is changed, so the two controls stay
+     independent. The crisp core is composited separately downstream from
+     the raw mask, so this buffer is purely the flowing trail.        */
+  const float INFLOW = 3.0;
+  float ca = contentSweep(vUv.y, uSweepReveal, uSweepHide, uSweepSoft);
+  float inject = fresh * clamp(influence, 0.0, 1.0) * ca;
+  float result = min(advected * uPersistence + inject * (1.0 - uPersistence) * INFLOW, 1.0);
 
   /* 8-bit fallback only: a sub-LSB dither breaks up the staircase that
      repeated quantised decay would otherwise etch into the trail. Harmless
@@ -469,7 +501,9 @@ uniform vec3  uPrimary, uSecondary;
 uniform float uRgbSplit;
 uniform float uExposure;    // Exposure (Burn)
 uniform float uFlat;        // 1.0 = bypass the ramp, show plain flat ink content
-uniform float uContentAlpha; // content lifecycle envelope: 0 (gone) .. 1 (fully present)
+uniform float uSweepReveal, uSweepHide, uSweepSoft;   // content wipe, see contentSweep()
+
+${SWEEP}
 
 vec3 blendScreen(vec3 b, vec3 s){ return 1.0 - (1.0 - b) * (1.0 - s); }
 
@@ -499,7 +533,8 @@ vec3 thermalAt(vec2 uv){
      with the fluid trail — the fluid buffer only ever holds brush-weighted
      material, so without this the core would fade wherever the brush
      currently isn't. */
-  float core = max(texture2D(tMask, uv).a * uContentAlpha, texture2D(tFluid, uv).a);
+  float core = max(texture2D(tMask, uv).a * contentSweep(uv.y, uSweepReveal, uSweepHide, uSweepSoft),
+                   texture2D(tFluid, uv).a);
   float glow = texture2D(tGlow, uv).a;
   float t = clamp(core + glow * 0.85, 0.0, 1.0);
   /* Exposure (Burn) reshapes the intensity curve: low exposure keeps most
@@ -512,7 +547,7 @@ vec3 thermalAt(vec2 uv){
 
 void main(){
   if (uFlat > 0.5){
-    float core = texture2D(tMask, vUv).a * uContentAlpha;
+    float core = texture2D(tMask, vUv).a * contentSweep(vUv.y, uSweepReveal, uSweepHide, uSweepSoft);
     gl_FragColor = vec4(mix(uGround, uInk, core), 1.0);
     return;
   }
@@ -1105,20 +1140,22 @@ function ease(t, mode){
   return t;
 }
 
-/** Content lifecycle: appears slowly (ease-in), holds fully visible, then
-    melts away on a linear fade, looping. Drives uContentAlpha so the
-    source material itself — not just the fluid trail — breathes over
-    time, matching a piece of type/logo materialising and dissolving. */
-const APPEAR_END = 0.35, HOLD_END = 0.55;
-function contentEnvelope(t, speed){
+/** Content lifecycle as a DOWNWARD SWEEP rather than a global fade: a reveal
+    edge descends from the top to bring the content in, it holds, then an
+    erase edge follows it down to take it away — so the source itself wipes
+    on and off in the same direction the fluid melts. Returns the two edge
+    positions (0..1 each); the spatial shaping happens in contentSweep(). */
+const APPEAR_END = 0.38, HOLD_END = 0.56;
+function contentPhase(t, speed){
   const period = Math.max(0.6, 34 / Math.max(speed, 0.5));
   const u = (t / period) % 1;
-  if (u < APPEAR_END) return ease(u / APPEAR_END, 'easein');
-  if (u < HOLD_END) return 1.0;
-  return Math.max(0, 1.0 - (u - HOLD_END) / (1.0 - HOLD_END));
+  if (u < APPEAR_END) return { reveal: ease(u / APPEAR_END, 'easeinout'), hide: 0 };
+  if (u < HOLD_END)   return { reveal: 1, hide: 0 };
+  return { reveal: 1, hide: (u - HOLD_END) / (1.0 - HOLD_END) };
 }
-let contentAlpha = 1;
-let forceContentVisible = false;   // export: pin the lifecycle envelope to fully-visible
+const SWEEP_FULL = { reveal: 1, hide: 0 };
+let sweep = SWEEP_FULL;
+let forceContentVisible = false;   // export: pin the sweep to fully-revealed
 
 let pointerUV = {x:0.5,y:0.62}, pointerActive = false, pointerPrev = null, pointerVel = {x:0,y:0};
 function canvasToUV(clientX, clientY){
@@ -1212,7 +1249,7 @@ function updateHud(){
     the export fast-forward loop (which uses a synthetic time value). */
 function stepFluid(t){
   const flow = computeFlow(t);
-  contentAlpha = forceContentVisible ? 1 : contentEnvelope(t, P.contentCycleSpeed);
+  sweep = forceContentVisible ? SWEEP_FULL : contentPhase(t, P.contentCycleSpeed);
 
   const src = rtFluid[fluidFront];
   const dst = rtFluid[1 - fluidFront];
@@ -1233,7 +1270,9 @@ function stepFluid(t){
   f2(progFluid,'uDragDir', flow.dragDir.x, flow.dragDir.y);
   f1(progFluid,'uTime', t);
   f1(progFluid,'uSeed', P.seed);
-  f1(progFluid,'uContentAlpha', contentAlpha);
+  f1(progFluid,'uSweepReveal', sweep.reveal);
+  f1(progFluid,'uSweepHide', sweep.hide);
+  f1(progFluid,'uSweepSoft', P.sweepSoftness);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   fluidFront = 1 - fluidFront;
 }
@@ -1314,7 +1353,9 @@ function renderFrame(){
   f1(progThermal,'uRgbSplit', P.rgbSplitGlow);
   f1(progThermal,'uExposure', P.exposure);
   f1(progThermal,'uFlat', P.burnOn ? 0 : 1);
-  f1(progThermal,'uContentAlpha', contentAlpha);
+  f1(progThermal,'uSweepReveal', sweep.reveal);
+  f1(progThermal,'uSweepHide', sweep.hide);
+  f1(progThermal,'uSweepSoft', P.sweepSoftness);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   /* ── PASS 2: scanner artifacts → screen ──────────────────────────────── */
@@ -1418,7 +1459,8 @@ const CONTROLS = [
    { t:'range', k:'assetScale', l:'Asset Scale', min:0.2, max:2.0, step:0.01, show:p=>p.contentType!=='text' },
    { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
    { t:'font', k:'customFontHero', l:'Custom Font', accept:'.ttf,.otf,.woff,.woff2' },
-   { t:'range', k:'contentCycleSpeed', l:'Content Cycle Speed', min:1, max:30, step:0.5 },
+   { t:'range', k:'contentCycleSpeed', l:'Sweep Speed', min:1, max:30, step:0.5 },
+   { t:'range', k:'sweepSoftness', l:'Sweep Softness', min:0, max:0.60, step:0.005 },
  ]},
  { title:'Fluid & Interaction', items:[
    { t:'segmented', k:'playing', l:'Animation', opts:[[true,'Pause'],[false,'Play']], invert:true },
