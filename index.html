@@ -1167,9 +1167,11 @@ function ease(t, mode){
   return t;
 }
 
-/* Content wipe phase boundaries within one cycle: reveal, then hold, then
-   erase. Driven by the SAME cycle as the brush (see computeAnim). */
-const APPEAR_END = 0.38, HOLD_END = 0.56;
+/* Content wipe rhythm within one cycle, as fractions of the cycle:
+   sweep in (0 -> 0.22), stay fully present (0.22 -> 0.52), then sweep away
+   over the remaining 48% — the erase is deliberately the longest phase so
+   the content lingers and then drifts off rather than snapping away. */
+const APPEAR_END = 0.22, HOLD_END = 0.52;
 
 /* Projection that turns a uv into "distance ahead of the sweep" for each
    direction, so the content wipe travels along the same axis the brush
@@ -1228,7 +1230,9 @@ function computeAnim(t){
     };
   }
 
-  const period = Math.max(0.35, 42 / Math.max(P.autoSpeed, 0.5));
+  /* Cycle length. A full appear/stay/erase pass should feel unhurried, so
+     the default (Auto Speed 10) runs ~16s rather than the previous ~4s. */
+  const period = Math.max(2.0, 160 / Math.max(P.autoSpeed, 0.5));
   const raw = (P.autoLoopMode === 'pingpong')
     ? 1 - Math.abs(((t / period) % 2) - 1)
     : (t / period) % 1;
@@ -1240,12 +1244,20 @@ function computeAnim(t){
   else if (dirKey === 'ltr') bx = u;
   else if (dirKey === 'rtl') bx = 1 - u;
 
-  /* The wipe rides the same eased progress, so Auto Easing shapes how the
-     content comes in and goes out exactly as it shapes the brush travel. */
+  /* Phase boundaries are taken from RAW progress so the appear / stay /
+     erase proportions above hold exactly, with Auto Easing applied WITHIN
+     each phase so it still shapes how the wipe edge moves. Easing the whole
+     cycle instead (the previous behaviour) warped the durations — ease-in
+     stretched the appear and compressed the erase, which is the opposite of
+     a slow drift-away. */
   let sw;
-  if      (u < APPEAR_END) sw = { reveal: u / APPEAR_END, hide: 0 };
-  else if (u < HOLD_END)   sw = { reveal: 1, hide: 0 };
-  else                     sw = { reveal: 1, hide: (u - HOLD_END) / (1 - HOLD_END) };
+  if (raw < APPEAR_END){
+    sw = { reveal: ease(raw / APPEAR_END, P.autoEasing), hide: 0 };
+  } else if (raw < HOLD_END){
+    sw = { reveal: 1, hide: 0 };
+  } else {
+    sw = { reveal: 1, hide: ease((raw - HOLD_END) / (1 - HOLD_END), P.autoEasing) };
+  }
 
   return { brush:{x:bx,y:by}, dragDir:{x:d[0],y:d[1]}, sweep: sw, axis: ax };
 }
