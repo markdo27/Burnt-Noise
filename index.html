@@ -1,0 +1,1603 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RADIANT BURNT — Generative Poster Maker</title>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     RADIANT BURNT / ANALOG SCANNER ARTIFACTS   (v3.0 — fluid feedback pipeline)
+     Interactive generative poster maker. Zero dependencies, pure WebGL 1.
+
+     PIPELINE
+       [ TEX ]   Hero mask     -> 2D canvas -> texture (tMask)
+                 Text (auto-fit), an uploaded image, or an uploaded SVG,
+                 rasterised to a white/alpha coverage mask, optionally
+                 edge-blurred before it enters the simulation.
+       [PASS A]  Fluid sim     -> ping-pong FBO pair (persists across frames!)
+                 Every frame: advect the PREVIOUS frame's accumulated state
+                 along a flow field (a moving "brush" + curl-ish turbulence),
+                 decay it (Persistence), then re-inject the fresh mask on
+                 top. Because this is a feedback loop rather than a
+                 recomputed-from-scratch shape, detail and motion keep
+                 building up over time — this is what makes it read as an
+                 actual fluid rather than a static drip.
+       [PASS B]  Blur / Glow   -> FBO (tGlow)
+                 Two iterations of a separable 9-tap Gaussian (H then V)
+                 turn the sharp fluid state into a soft aura.
+       [PASS C]  Thermal Map   -> FBO (rtScene)
+                 core (sharp) + glow (blurred) drive a luminance lookup
+                 that blends a user 2-colour "cool" ramp with a built-in
+                 "hot" fire ramp (Exposure/Burn controls the blend), with
+                 its own small chromatic split, screen-blended over ground.
+       [ TEX ]   Poster type   -> 2D canvas -> texture (tText)
+                 Swiss/Brutalist metadata (kicker, date, subtitle, serial,
+                 edge text, crop marks) — everything except the hero word.
+       [PASS 2]  Scanner FX    -> default framebuffer (screen / export)
+                 Reads rtScene + tText, composites the metadata type, then
+                 degrades the whole frame: head jitter, chromatic
+                 aberration, photocopy threshold, glass streaks, scanlines,
+                 dust, scratches, grain, vignette.
+
+     EXPORT: the fluid buffer is resolution-local, so a fresh export at a
+     new resolution starts from an empty simulation. exportPNG() fast-
+     forwards PASS A alone (no visual output) for enough steps that
+     Persistence has converged, so the export looks like the "settled"
+     on-screen state rather than a blank first frame.
+     ══════════════════════════════════════════════════════════════════════ -->
+
+<style>
+:root{
+  --bg:#0a0a0b; --panel:#101012; --panel2:#161619; --line:#26262b;
+  --ink:#e8e8ea; --dim:#75757e; --hot:#ff3b18; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--ink); overflow:hidden;
+  font:400 12px/1.4 var(--mono); -webkit-font-smoothing:antialiased;
+  display:grid; grid-template-columns:312px 1fr;
+}
+
+/* ─── STAGE ────────────────────────────────────────────────────────────── */
+#stage{
+  position:relative; display:grid; place-items:center; padding:28px; min-width:0; min-height:0;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #131316 0%, #0a0a0b 60%),
+    repeating-linear-gradient(45deg,#0c0c0e 0 2px,transparent 2px 8px);
+}
+#gl{
+  display:block; max-width:100%; max-height:100%;
+  box-shadow:0 40px 90px -20px #000, 0 0 0 1px #000, 0 0 60px -30px var(--hot);
+  background:#000;
+}
+#gl.manual{cursor:crosshair}
+#hud{
+  position:absolute; left:14px; bottom:10px; color:var(--dim); font-size:10px;
+  letter-spacing:.14em; text-transform:uppercase; pointer-events:none; user-select:none;
+}
+#hud b{color:var(--hot);font-weight:400}
+
+/* ─── PANEL ────────────────────────────────────────────────────────────── */
+#panel{
+  background:var(--panel); border-right:1px solid var(--line);
+  overflow-y:auto; overflow-x:hidden; scrollbar-width:thin;
+  scrollbar-color:var(--line) transparent;
+}
+#panel::-webkit-scrollbar{width:8px}
+#panel::-webkit-scrollbar-thumb{background:var(--line)}
+.brand{
+  padding:14px 16px 13px; border-bottom:1px solid var(--line); position:sticky; top:0;
+  background:var(--panel); z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px;
+}
+.brand h1{font-size:13px;letter-spacing:.2em;font-weight:600}
+.brand h1 span{color:var(--hot)}
+.brand p{color:var(--dim);font-size:10px;letter-spacing:.1em;margin-top:5px}
+#resetBtn{width:auto;padding:6px 9px;font-size:9px;flex:none}
+
+section{border-bottom:1px solid var(--line)}
+section>h2{
+  font-size:10px; letter-spacing:.18em; color:var(--dim); font-weight:500;
+  padding:11px 16px; cursor:pointer; display:flex; justify-content:space-between;
+  align-items:center; user-select:none; text-transform:uppercase;
+}
+section>h2:hover{color:var(--ink)}
+section>h2::after{content:"−";color:var(--dim);font-size:13px}
+section.closed>h2::after{content:"+"}
+section.closed .body{display:none}
+.body{padding:2px 16px 15px}
+.body.dim>*:not(:first-child){opacity:.32;pointer-events:none;filter:saturate(0)}
+
+.row{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.row label{flex:1;color:var(--dim);font-size:10px;letter-spacing:.07em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .val{width:46px;text-align:right;font-size:10px;color:var(--ink);font-variant-numeric:tabular-nums}
+
+/* sliders */
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:2px;background:var(--line);
+  outline:none;cursor:ew-resize;margin:9px 0 3px;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:11px;height:11px;background:var(--ink);
+  border-radius:50%;cursor:ew-resize;transition:background .12s;
+}
+input[type=range]:hover::-webkit-slider-thumb{background:var(--hot)}
+input[type=range]::-moz-range-thumb{width:11px;height:11px;background:var(--ink);border:0;border-radius:50%;cursor:ew-resize}
+.slot{margin-bottom:11px}
+.slot .row{margin-bottom:0}
+
+/* colors */
+input[type=color]{
+  -webkit-appearance:none;appearance:none;width:34px;height:20px;padding:0;
+  border:1px solid var(--line);background:none;cursor:pointer;
+}
+input[type=color]::-webkit-color-swatch-wrapper{padding:0}
+input[type=color]::-webkit-color-swatch{border:none}
+input[type=color]::-moz-color-swatch{border:none}
+
+/* text + selects */
+input[type=text],select,textarea{
+  width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+  font:400 11px var(--mono);padding:7px 8px;outline:none;
+}
+textarea{resize:vertical;min-height:52px}
+input[type=text]:focus,select:focus,textarea:focus{border-color:var(--hot)}
+.fld{margin-bottom:9px}
+.fld span{display:block;color:var(--dim);font-size:9px;letter-spacing:.16em;margin-bottom:4px;text-transform:uppercase}
+
+/* buttons */
+button{
+  background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+  font:500 10px var(--mono);letter-spacing:.13em;padding:9px 8px;cursor:pointer;
+  text-transform:uppercase;transition:.12s;width:100%;
+}
+button:hover{background:var(--hot);border-color:var(--hot);color:#000}
+button:active{transform:translateY(1px)}
+button.hot{background:var(--hot);border-color:var(--hot);color:#000;font-weight:700}
+button.hot:hover{filter:brightness(1.18)}
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px}
+.btns.one{grid-template-columns:1fr}
+
+/* segmented (2-way) toggle buttons, e.g. Pause/Play, Manual/Auto */
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:11px}
+.seg button{padding:8px}
+.seg button.on{background:var(--ink);border-color:var(--ink);color:#000;font-weight:700}
+
+/* file upload */
+.filebtn{position:relative;overflow:hidden;margin-bottom:9px}
+.filebtn input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.filebtn .name{display:block;margin-top:4px;color:var(--dim);font-size:9px;letter-spacing:.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* palette swatches */
+.pal{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:11px}
+.sw{height:30px;border:1px solid var(--line);cursor:pointer;position:relative;overflow:hidden}
+.sw:hover{border-color:var(--ink)}
+.sw i{position:absolute;top:0;bottom:0;width:33.34%}
+.sw i:nth-child(1){left:0}.sw i:nth-child(2){left:33.33%}.sw i:nth-child(3){left:66.66%}
+
+.toggle{display:flex;align-items:center;gap:8px;margin-bottom:9px;cursor:pointer;user-select:none}
+.toggle input{appearance:none;-webkit-appearance:none;width:26px;height:14px;background:var(--line);position:relative;cursor:pointer;flex:none;transition:.15s}
+.toggle input::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;background:var(--dim);transition:.15s}
+.toggle input:checked{background:var(--hot)}
+.toggle input:checked::after{left:14px;background:#000}
+.toggle span{color:var(--dim);font-size:10px;letter-spacing:.07em}
+.toggle.big{margin-bottom:12px}
+.toggle.big span{color:var(--ink);font-size:10.5px;font-weight:600;letter-spacing:.1em}
+
+/* responsive: panel becomes a bottom drawer */
+@media (max-width:880px){
+  body{grid-template-columns:1fr;grid-template-rows:1fr 46vh}
+  #panel{border-right:0;border-top:1px solid var(--line)}
+  #stage{padding:14px}
+}
+#fatal{position:fixed;inset:0;display:none;place-items:center;background:#0a0a0b;color:var(--hot);
+  text-align:center;padding:40px;letter-spacing:.1em;z-index:99}
+</style>
+
+<div id="panel">
+  <div class="brand">
+    <div><h1>RADIANT <span>BURNT</span></h1><p>GENERATIVE POSTER MAKER / v3.0</p></div>
+    <button id="resetBtn" type="button">↺ Reset</button>
+  </div>
+  <form id="ui" autocomplete="off" onsubmit="return false"></form>
+</div>
+
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <div id="hud"><b>●</b> <span id="hudTxt">—</span></div>
+</div>
+
+<div id="fatal">WEBGL UNAVAILABLE — THIS TOOL REQUIRES A WEBGL-CAPABLE BROWSER.</div>
+
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════
+   1. PARAMETER STATE
+   Every control writes here; every uniform reads from here each frame.
+   ═══════════════════════════════════════════════════════════════════════ */
+const P = {
+  // ── Radiant Burnt master ──
+  burnOn:true,
+
+  // ── Content Source ──
+  contentType:'text',       // 'text' | 'image' | 'svg'
+  title:'RADIANT\nBURNT',
+  fontSize:0.88,
+  assetScale:1.0,
+  edgeBlur:2,
+  customFontHero:null,      // font-family name once a custom font is loaded, else null
+  contentCycleSpeed:8,
+
+  // ── Fluid & Interaction ──
+  playing:true,
+  interactionMode:'auto',   // 'manual' | 'auto'
+  autoSpeed:10,
+  autoDirection:'ttb',      // ttb | btt | ltr | rtl
+  autoLoopMode:'wrap',      // wrap | pingpong
+  autoEasing:'easein',      // linear | easein | easeout | easeinout
+  brushRadius:0.16,
+  smearIntensity:0.14,
+  persistence:0.93,
+  fluidWarp:0.05,
+  warpScale:2.5,
+
+  // ── Optical Effects ──
+  glowPrimary:'#57adff', glowSecondary:'#0f35a5', ground:'#050208',
+  rgbSplitGlow:0.006,
+  glowSoftness:16,
+  exposure:1.0,
+
+  // ── Analog Scanner Artifacts ──
+  scanOn:true,
+  split:0.0, grain:0.16, scanAmt:0.0, scanDens:0.55, streak:0.0,
+  dust:0.0, scratch:0.0, thresh:0.18, contrast:1.12, vig:0.0, jitter:0.0,
+
+  // ── Poster metadata typography ──
+  subtitle:'A study in thermal gradients, fluid feedback and the quiet violence of a flatbed scanner.',
+  kicker:'BRIK / STUDIO EDITION', date:'16.08.2026', serial:'NO. 0417 / 500', edge:'ANALOG SCANNER ARTIFACTS',
+  ink:'#f4f2ee', textMode:0, customFontMeta:null,
+
+  // ── System ──
+  aspect:'2:3', seed:Math.random()*500, frozen:false, exportH:2400
+};
+const DEFAULTS = JSON.parse(JSON.stringify(P));
+
+/* ══════════════════════════════════════════════════════════════════════════
+   2. SHADERS
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const VERT = `
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){
+  vUv = aPos * 0.5 + 0.5;          // vUv.y = 0 at BOTTOM of frame, 1 at TOP
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+/* ─── Shared noise toolkit (injected into every fragment shader) ─────────── */
+const NOISE = `
+float hash11(float p){
+  p = fract(p * 0.1031);
+  p *= p + 33.33;
+  p *= p + p;
+  return fract(p);
+}
+float hash21(vec2 p){
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*f*(f*(f*6.0-15.0)+10.0);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+const mat2 ROT = mat2(1.62, 1.20, -1.20, 1.62);
+float fbm(vec2 p){
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++){
+    v += a * vnoise(p);
+    p = ROT * p;
+    a *= 0.5;
+  }
+  return v;
+}
+float luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+`;
+
+/* ═══════ PASS A — FLUID SIMULATION (persistent feedback) ══════════════════
+   Reads its own previous output. Every step: advect along a flow field
+   built from a moving "brush" (manual pointer or an automatic sweep) plus
+   curl-ish turbulence, decay the result (Persistence), then re-inject the
+   fresh content mask so the true shape never fully washes away. Because
+   this accumulates frame over frame rather than recomputing from scratch,
+   the result keeps developing organic detail — that's the whole trick.
+   ═══════════════════════════════════════════════════════════════════════ */
+const FRAG_FLUID = `
+precision highp float;
+varying vec2 vUv;
+
+uniform sampler2D tPrev;    // this pass's own previous output (ping-pong)
+uniform sampler2D tMask;    // fresh content mask (text / image / svg)
+uniform float uAspect;
+uniform vec2  uBrush;       // poster-space (x*aspect, y)
+uniform float uBrushRadius;
+uniform float uSmear;
+uniform float uPersistence;
+uniform float uWarp;
+uniform float uWarpScale;
+uniform vec2  uDragDir;
+uniform float uContentAlpha;
+uniform float uTime;
+uniform float uSeed;
+
+${NOISE}
+
+void main(){
+  vec2 uv = vUv;
+  vec2 P  = vec2(uv.x * uAspect, uv.y);
+
+  /* Curl-ish turbulence: two decorrelated noise fields treated as a vector.
+     Not a true divergence-free curl, but visually reads the same at this
+     scale and is a fraction of the cost. */
+  float tA = fbm(P * uWarpScale + uSeed + uTime * 0.06);
+  float tB = fbm(P * uWarpScale + vec2(6.7, 2.3) + uSeed - uTime * 0.05);
+  vec2 turb = (vec2(tA, tB) - 0.5) * uWarp;
+
+  /* The brush drags harder nearby and fades smoothly with distance. */
+  float dist = length(P - uBrush);
+  float influence = exp(-pow(dist / max(uBrushRadius, 0.001), 2.0));
+
+  vec2 flow = (uDragDir + turb) * uSmear * (0.22 + influence * 1.6);
+  vec2 srcUV = clamp(uv - vec2(flow.x / uAspect, flow.y), 0.0, 1.0);
+
+  float advected = texture2D(tPrev, srcUV).a;
+  float fresh    = texture2D(tMask, uv).a;
+
+  /* Injection is weighted by brush influence rather than stamped at full
+     strength everywhere every frame — an unconditional full-strength
+     stamp every frame would re-seed a complete, undragged copy of the
+     shape each frame, which (combined with a periodic auto-sweep) reads
+     as repeating stroboscoped copies rather than one continuous melt.
+     The always-visible crisp core is handled separately downstream (Pass
+     C samples the raw mask directly); this buffer is purely the fluid
+     trail that the brush drags and time decays. */
+  float inject = fresh * clamp(influence, 0.0, 1.0) * uContentAlpha;
+  float result = max(advected * uPersistence, inject);
+  gl_FragColor = vec4(vec3(result), result);
+}`;
+
+/* ═══════ PASS B — BLUR / GLOW ══════════════════════════════════════════════
+   Separable 9-tap Gaussian. Run horizontally then vertically (and the pair
+   twice from JS) to build a heavy, soft aura around the fluid state.
+   ═══════════════════════════════════════════════════════════════════════ */
+const FRAG_BLUR = `
+precision highp float;
+varying vec2 vUv;
+
+uniform sampler2D tSrc;
+uniform vec2  uTexel;
+uniform vec2  uDir;
+uniform float uRadius;
+
+void main(){
+  float w0 = 0.2270270270;
+  float w1 = 0.1945945946;
+  float w2 = 0.1216216216;
+  float w3 = 0.0540540541;
+  float w4 = 0.0162162162;
+
+  vec2 o = uDir * uTexel * max(uRadius, 0.0001);
+
+  vec4 sum = texture2D(tSrc, vUv) * w0;
+  sum += texture2D(tSrc, vUv + o * 1.0) * w1;
+  sum += texture2D(tSrc, vUv - o * 1.0) * w1;
+  sum += texture2D(tSrc, vUv + o * 2.0) * w2;
+  sum += texture2D(tSrc, vUv - o * 2.0) * w2;
+  sum += texture2D(tSrc, vUv + o * 3.0) * w3;
+  sum += texture2D(tSrc, vUv - o * 3.0) * w3;
+  sum += texture2D(tSrc, vUv + o * 4.0) * w4;
+  sum += texture2D(tSrc, vUv - o * 4.0) * w4;
+
+  gl_FragColor = sum;
+}`;
+
+/* ═══════ PASS C — THERMAL GRADIENT MAP ═════════════════════════════════════
+   core (sharp) + glow (blurred) drive a luminance lookup that blends a
+   user-defined 2-colour "cool" ramp with a built-in "hot" fire ramp — the
+   Exposure (Burn) control decides how much of the hot ramp bleeds into the
+   brightest areas, so the very core always reads as burning regardless of
+   which cool colours are chosen. A small built-in chromatic split is
+   applied to the glow itself (separate from the scanner pass's split).
+   ═══════════════════════════════════════════════════════════════════════ */
+const FRAG_THERMAL = `
+precision highp float;
+varying vec2 vUv;
+
+uniform sampler2D tFluid;   // Pass A output — pure fluid trail (brush-weighted)
+uniform sampler2D tGlow;    // Pass B output — blurred version of tFluid
+uniform sampler2D tMask;    // raw content mask — always-visible crisp core
+uniform vec3  uGround, uInk;
+uniform vec3  uPrimary, uSecondary;
+uniform float uRgbSplit;
+uniform float uExposure;    // Exposure (Burn)
+uniform float uFlat;        // 1.0 = bypass the ramp, show plain flat ink content
+uniform float uContentAlpha; // content lifecycle envelope: 0 (gone) .. 1 (fully present)
+
+vec3 blendScreen(vec3 b, vec3 s){ return 1.0 - (1.0 - b) * (1.0 - s); }
+
+/* Single continuous 7-stop ramp (black -> secondary -> primary -> built-in
+   fire handoff -> white-hot core) instead of two separate ramps blended
+   together — blending two independently-curved ramps produced visible
+   "seams" where the mix crossed over; one monotonic ramp reads as one
+   smooth gradient, matching a real thermal-camera colour map. */
+vec3 thermalRamp(float t){
+  vec3 c0 = vec3(0.0);
+  vec3 c1 = uSecondary;
+  vec3 c2 = mix(uSecondary, uPrimary, 0.55);
+  vec3 c3 = uPrimary;
+  vec3 c4 = vec3(0.95, 0.25, 0.05);
+  vec3 c5 = vec3(1.00, 0.60, 0.10);
+  vec3 c6 = vec3(1.00, 0.98, 0.85);
+  vec3 col = mix(c0, c1, smoothstep(0.0/6.0, 1.0/6.0, t));
+  col = mix(col, c2, smoothstep(1.0/6.0, 2.0/6.0, t));
+  col = mix(col, c3, smoothstep(2.0/6.0, 3.0/6.0, t));
+  col = mix(col, c4, smoothstep(3.0/6.0, 4.0/6.0, t));
+  col = mix(col, c5, smoothstep(4.0/6.0, 5.0/6.0, t));
+  col = mix(col, c6, smoothstep(5.0/6.0, 6.0/6.0, t));
+  return col;
+}
+vec3 thermalAt(vec2 uv){
+  /* The crisp core is the raw content shape (always fully present) merged
+     with the fluid trail — the fluid buffer only ever holds brush-weighted
+     material, so without this the core would fade wherever the brush
+     currently isn't. */
+  float core = max(texture2D(tMask, uv).a * uContentAlpha, texture2D(tFluid, uv).a);
+  float glow = texture2D(tGlow, uv).a;
+  float t = clamp(core + glow * 0.85, 0.0, 1.0);
+  /* Exposure (Burn) reshapes the intensity curve: low exposure keeps most
+     of the frame in the cool (user-coloured) range; high exposure pushes
+     more of it into the built-in hot core, so the control has a real,
+     continuous effect rather than a simple brightness multiply. */
+  float texp = pow(t, mix(1.55, 0.55, clamp(uExposure / 2.0, 0.0, 1.0)));
+  return thermalRamp(texp);
+}
+
+void main(){
+  if (uFlat > 0.5){
+    float core = texture2D(tMask, vUv).a * uContentAlpha;
+    gl_FragColor = vec4(mix(uGround, uInk, core), 1.0);
+    return;
+  }
+
+  vec2 cc  = vUv - 0.5;
+  vec2 dir = normalize(cc + 1e-6);
+  float split = uRgbSplit;
+
+  vec3 cR = thermalAt(vUv + dir * split);
+  vec3 cG = thermalAt(vUv);
+  vec3 cB = thermalAt(vUv - dir * split);
+  vec3 thermal = vec3(cR.r, cG.g, cB.b) * clamp(uExposure, 0.2, 2.0);
+
+  vec3 col = blendScreen(uGround, thermal);
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}`;
+
+/* ═══════ PASS 2 — ANALOG SCANNER ARTIFACTS ════════════════════════════════ */
+const FRAG_POST = `
+precision highp float;
+varying vec2 vUv;
+
+uniform sampler2D tScene;   // finished Radiant Burnt artwork (ground + hero content)
+uniform sampler2D tText;    // poster metadata typography (white + alpha)
+uniform float uAspect;
+uniform float uUnit;        // poster-space reference height (resolution independent)
+uniform float uTime;
+uniform float uSeed;
+
+uniform float uSplit;       // chromatic aberration
+uniform float uGrain;
+uniform float uScanAmt;
+uniform float uScanDens;
+uniform float uStreak;
+uniform float uDust;
+uniform float uScratch;
+uniform float uThresh;      // photocopy bleed
+uniform float uContrast;
+uniform float uVig;
+uniform float uJitter;      // scanner head wobble
+uniform float uMode;        // metadata type blend mode 0..3
+uniform vec3  uInk;
+
+${NOISE}
+
+/* ── DUST ────────────────────────────────────────────────────────────────
+   Grid of cells; each cell may contain one speck at a random offset with a
+   random radius. Static (seed-driven) so it reads as dirt on the glass and
+   not as video noise. Returns 0..1 coverage.                            */
+float dustLayer(vec2 P, float cell, float seed, float density){
+  vec2 g  = P / cell;
+  vec2 id = floor(g), f = fract(g);
+  if (hash21(id + seed) > density) return 0.0;
+  vec2  c = vec2(hash21(id + seed + 1.3), hash21(id + seed + 7.7));
+  float r = 0.06 + 0.26 * hash21(id + seed + 3.1);
+  return smoothstep(r, r * 0.25, length(f - c));
+}
+
+/* ── SCRATCHES ───────────────────────────────────────────────────────────
+   Near-vertical hairlines (the drag direction of a flatbed carriage), each
+   with a slow sinusoidal wobble and a randomised vertical span.         */
+float scratchLayer(vec2 P, vec2 uv, float seed){
+  float s = 0.0;
+  for (int i = 0; i < 5; i++){
+    float fi = float(i);
+    float h0 = hash11(seed + fi * 11.3);
+    float h1 = hash11(seed + fi *  3.7);
+    float h2 = hash11(seed + fi *  5.1);
+    float h3 = hash11(seed + fi *  9.9);
+
+    float xline = h0 * uAspect * uUnit
+                + sin(P.y * 0.011 + h1 * 6.2831) * 22.0;   // wobble
+    float w     = 0.5 + 1.7 * h2;                           // hairline width
+
+    // vertical span so scratches don't run edge to edge
+    float y0 = h1 * 0.8;
+    float y1 = y0 + 0.15 + 0.7 * h3;
+    float span = smoothstep(y0, y0 + 0.06, uv.y) * (1.0 - smoothstep(y1 - 0.06, y1, uv.y));
+
+    float line = smoothstep(w, 0.0, abs(P.x - xline)) * span;
+    s += line * mix(-1.0, 1.0, step(0.5, h3));              // black or white
+  }
+  return s;
+}
+
+void main(){
+  vec2 uv = vUv;
+
+  /* ── 1. SCANNER HEAD JITTER ────────────────────────────────────────────
+     Per-row horizontal displacement. Most rows nudge sub-pixel; a rare few
+     tear noticeably — the classic stepper-motor stutter.               */
+  float row  = floor(uv.y * uUnit / 3.0);
+  float tick = floor(uTime * 9.0);
+  float jw   = hash11(row + tick * 77.0 + uSeed) - 0.5;
+  float tear = step(0.988, hash11(row * 1.7 + tick * 13.0 + uSeed));
+  uv.x += jw * uJitter * (0.0018 + 0.022 * tear);
+  uv.x += sin(uv.y * 42.0 + uTime * 0.6) * uJitter * 0.0007;   // lens wobble
+
+  /* ── 2. CHROMATIC ABERRATION ───────────────────────────────────────────
+     Radial, quadratic with distance from centre: nothing at the middle,
+     visible fringing at the corners — how a real lens/CIS bar behaves.  */
+  vec2  cc  = uv - 0.5;
+  float rr  = dot(cc, cc);
+  vec2  dir = normalize(cc + 1e-6);
+  float amt = uSplit * (0.0022 + rr * 0.020);
+
+  vec3 col;
+  col.r = texture2D(tScene, uv + dir * amt).r;
+  col.g = texture2D(tScene, uv).g;
+  col.b = texture2D(tScene, uv - dir * amt).b;
+
+  /* ── 3. COMPOSITE METADATA TYPOGRAPHY (inside the FX chain) ─────────────
+     Sampling the type's alpha per channel at the split offsets gives the
+     lettering free RGB fringing that matches the artwork exactly.      */
+  vec3 ta = vec3(
+    texture2D(tText, uv + dir * amt * 0.65).a,
+    texture2D(tText, uv).a,
+    texture2D(tText, uv - dir * amt * 0.65).a
+  );
+  vec3 ink = uInk;
+  vec3 res;
+  if      (uMode < 0.5) res = mix(col, ink, ta);                              // normal
+  else if (uMode < 1.5) res = mix(col, col * ink, ta);                        // multiply
+  else if (uMode < 2.5) res = mix(col, 1.0 - (1.0 - col) * (1.0 - ink), ta);  // screen
+  else                  res = mix(col, abs(col - ink), ta);                  // difference
+  col = res;
+
+  /* Poster-space coordinates: all artefacts below are sized relative to the
+     PAPER, not the pixel grid, so exports scale up cleanly.            */
+  vec2 P = vec2(uv.x * uAspect, uv.y) * uUnit;
+
+  /* ── 4. PHOTOCOPY BLEED / THRESHOLD ────────────────────────────────────
+     A soft threshold pushes midtones toward the extremes; the contrast
+     term then makes the whole thing feel like toner on paper.         */
+  vec3 th = smoothstep(vec3(0.22), vec3(0.78), col);
+  col = mix(col, th, uThresh);
+  col = (col - 0.5) * uContrast + 0.5;
+
+  /* ── 5. GLASS STREAKS ──────────────────────────────────────────────────
+     Static per-column bright/dark bands = dirt on the platen.          */
+  float cA = smoothstep(0.984, 1.0, hash11(floor(P.x / 2.0) + uSeed * 31.0));
+  float cB = smoothstep(0.984, 1.0, hash11(floor(P.x / 3.0) + uSeed * 7.0 + 100.0));
+  col += cA * uStreak * 0.32;
+  col -= cB * uStreak * 0.24;
+
+  /* Travelling lamp bar — one soft horizontal band drifting down the frame. */
+  float barPos = fract(uTime * 0.06 + uSeed * 0.37);
+  float bar    = exp(-pow((uv.y - barPos) * 5.5, 2.0));
+  col *= 1.0 + bar * uStreak * 0.30;
+
+  /* Large-scale mottling: uneven illumination / dirty glass. */
+  col *= 1.0 - fbm(P * 0.0035 + uSeed) * 0.16 * uDust;
+
+  /* ── 6. SCANLINES ──────────────────────────────────────────────────────
+     Fine line pair + a broad slow moiré band. */
+  float sl = 0.5 + 0.5 * sin(P.y * uScanDens * 3.14159);
+  col *= 1.0 - uScanAmt * sl;
+  col *= 1.0 - uScanAmt * 0.35 * (0.5 + 0.5 * sin(uv.y * 180.0 + uTime * 1.6));
+
+  /* ── 7. DUST & SCRATCHES ───────────────────────────────────────────────
+     Two dust scales, white specks and black specks, plus hairlines.    */
+  float dW = dustLayer(P, 7.0,  uSeed * 3.1,        uDust * 0.030);
+  float dB = dustLayer(P, 11.0, uSeed * 5.7 + 40.0, uDust * 0.026);
+  float dS = dustLayer(P, 26.0, uSeed * 9.3 + 90.0, uDust * 0.012);
+  col += dW * 0.85;
+  col -= dB * 0.80;
+  col -= dS * 0.55;
+  col += scratchLayer(P, uv, uSeed * 13.0) * uScratch * 0.55;
+
+  /* ── 8. GRAIN ──────────────────────────────────────────────────────────
+     Two decorrelated layers, weighted toward midtones — highlights and
+     deep blacks carry less visible grain on real film/scans.          */
+  float t24 = floor(uTime * 24.0);
+  float g1 = hash21(P * 1.30 + t24 * vec2(13.7, 7.3) + uSeed);
+  float g2 = hash21(P * 0.61 - t24 * vec2( 3.1, 9.7) + uSeed);
+  float grain = (g1 * 0.65 + g2 * 0.35) - 0.5;
+  float mask  = 1.0 - abs(luma(col) - 0.5) * 1.15;
+  col += grain * uGrain * clamp(mask, 0.15, 1.0);
+
+  /* ── 9. VIGNETTE + PAPER CAST ──────────────────────────────────────── */
+  col *= clamp(1.0 - uVig * pow(rr * 2.15, 1.4), 0.0, 1.0);
+  col  = mix(col, col * vec3(1.03, 0.995, 0.955), 0.65);
+
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   3. MINIMAL WEBGL HELPER
+   ═══════════════════════════════════════════════════════════════════════ */
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', {
+  antialias:false,
+  preserveDrawingBuffer:true,   // required so toBlob() can read the post-processed buffer
+  alpha:false,
+  premultipliedAlpha:false
+}) || canvas.getContext('experimental-webgl');
+
+if (!gl){ document.getElementById('fatal').style.display = 'grid'; throw new Error('no webgl'); }
+
+const MAX_TEX = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s) + '\n' + src.split('\n').map((l,i)=>(i+1)+': '+l).join('\n'));
+  return s;
+}
+function program(vs, fs){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.bindAttribLocation(p, 0, 'aPos');
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  p._u = {};
+  return p;
+}
+function loc(p, n){
+  if (!(n in p._u)) p._u[n] = gl.getUniformLocation(p, n);
+  return p._u[n];
+}
+const f1 = (p,n,v)   => gl.uniform1f(loc(p,n), v);
+const f2 = (p,n,a,b) => gl.uniform2f(loc(p,n), a, b);
+const f3 = (p,n,c)   => gl.uniform3f(loc(p,n), c[0], c[1], c[2]);
+const i1 = (p,n,v)   => gl.uniform1i(loc(p,n), v);
+
+/** '#ff3d00' -> [1, 0.239, 0]. Straight sRGB values, no colour management,
+    so what the picker shows is what the shader gets. */
+function hex3(h){
+  h = h.replace('#','');
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  const n = parseInt(h, 16);
+  return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
+}
+
+/* fullscreen triangle-strip quad */
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+const progFluid   = program(VERT, FRAG_FLUID);
+const progBlur    = program(VERT, FRAG_BLUR);
+const progThermal = program(VERT, FRAG_THERMAL);
+const progPost    = program(VERT, FRAG_POST);
+
+/* ── Textures & render targets ─────────────────────────────────────────── */
+function makeTex(){
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function makeRT(){ return { tex: makeTex(), fbo: gl.createFramebuffer() }; }
+function resizeRT(rt, w, h){
+  gl.bindTexture(gl.TEXTURE_2D, rt.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rt.tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+function clearRT(rt){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+  gl.viewport(0, 0, bufW, bufH);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+const rtFluid = [makeRT(), makeRT()];   // persistent ping-pong — NOT recreated per frame
+let fluidFront = 0;
+const rtBlurA = makeRT();
+const rtBlurB = makeRT();
+const rtScene = makeRT();
+
+function resizeAllRT(w, h){
+  resizeRT(rtFluid[0], w, h); resizeRT(rtFluid[1], w, h);
+  resizeRT(rtBlurA, w, h); resizeRT(rtBlurB, w, h); resizeRT(rtScene, w, h);
+}
+function resetFluid(){
+  clearRT(rtFluid[0]); clearRT(rtFluid[1]);
+  fluidFront = 0;
+}
+
+const maskTex = makeTex();   // hero content mask, CPU-uploaded from heroCanvas
+const textTex = makeTex();   // metadata typography, CPU-uploaded from textCanvas
+
+/* ══════════════════════════════════════════════════════════════════════════
+   4. TYPOGRAPHY / ASSET  →  CANVAS 2D  →  TEXTURE
+   Two independent canvases: the hero content (feeds the fluid pipeline) and
+   the Swiss metadata layout (kicker, date, subtitle, serial, edge text,
+   crop marks). Both are drawn in white with alpha; colour is applied later.
+   ═══════════════════════════════════════════════════════════════════════ */
+const textCanvas = document.createElement('canvas');
+const tctx = textCanvas.getContext('2d');
+const heroCanvas = document.createElement('canvas');
+const hctx = heroCanvas.getContext('2d');
+const scratchCanvas = document.createElement('canvas');
+
+const SANS  = '"Helvetica Neue", Helvetica, Arial, "Segoe UI", sans-serif';
+const HEAVY = '"Helvetica Neue", "Arial Black", Helvetica, Arial, sans-serif';
+
+let uploadedAsset = null;   // HTMLImageElement for 'image' / 'svg' content types
+
+/** Custom uploaded fonts (Content Source: hero font; Metadata Typography:
+    optional separate override). Falls back to the system faces above. */
+function heroFont(){ return P.customFontHero || HEAVY; }
+function metaFont(){ return P.customFontMeta || P.customFontHero || SANS; }
+
+function loadFontFile(file, targetKey){
+  const reader = new FileReader();
+  reader.onload = () => {
+    const family = 'RBFont_' + targetKey + '_' + Date.now();
+    const face = new FontFace(family, reader.result);
+    face.load().then(loaded => {
+      document.fonts.add(loaded);
+      P[targetKey] = family;
+      drawHeroMask(bufW, bufH);
+      drawPoster(bufW, bufH);
+      buildUI();
+    }).catch(() => { /* unsupported/corrupt font file — silently keep the previous font */ });
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+/** Draw text with manual letter-spacing (tracking). Supports left/right/center. */
+function tracked(ctx, text, x, y, track, align){
+  const chars = [...text];
+  let total = 0;
+  for (const c of chars) total += ctx.measureText(c).width + track;
+  if (chars.length) total -= track;
+  let cx = align === 'right' ? x - total : align === 'center' ? x - total/2 : x;
+  for (const c of chars){ ctx.fillText(c, cx, y); cx += ctx.measureText(c).width + track; }
+  return total;
+}
+
+/** Greedy word wrap honouring explicit \n line breaks. */
+function wrap(ctx, text, maxW){
+  const out = [];
+  for (const para of text.split('\n')){
+    let line = '';
+    for (const word of para.split(/\s+/)){
+      if (!word) continue;
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width > maxW && line){ out.push(line); line = word; }
+      else line = test;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Hero content mask: text (auto-fit), an uploaded image, or an uploaded SVG,
+    rasterised to white-with-alpha coverage, then optionally edge-blurred.
+    This is the ONLY thing that feeds the fluid pipeline (tMask). */
+function drawHeroMask(W, H){
+  heroCanvas.width = W; heroCanvas.height = H;
+  const c = hctx;
+  c.clearRect(0, 0, W, H);
+
+  const M  = 0.085 * W;
+  const cw = W - M * 2;
+
+  if ((P.contentType === 'image' || P.contentType === 'svg') && uploadedAsset){
+    const iw = uploadedAsset.naturalWidth || uploadedAsset.width;
+    const ih = uploadedAsset.naturalHeight || uploadedAsset.height;
+    if (iw > 0 && ih > 0){
+      const fitW = W * 0.72 * P.assetScale;
+      const fitH = fitW * (ih / iw);
+      c.drawImage(uploadedAsset, (W - fitW) / 2, (H - fitH) / 2, fitW, fitH);
+      const id = c.getImageData(0, 0, W, H);
+      const d = id.data;
+      for (let i = 0; i < d.length; i += 4){
+        const a = d[i + 3];
+        const cov = a < 250 ? a : (d[i]*0.2126 + d[i+1]*0.7152 + d[i+2]*0.0722);
+        d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = cov;
+      }
+      c.putImageData(id, 0, 0);
+    }
+  } else {
+    c.fillStyle = '#fff';
+    c.textBaseline = 'alphabetic';
+
+    const topLim = M + 0.075 * W;
+    const botLim = H - M - 0.10 * W;
+    const maxH   = Math.max(1, (botLim - topLim) * P.fontSize);
+
+    const text = P.title.trim() || 'BURNT';
+    let px = 0.30 * W, lines = [], lead = 0;
+    for (let guard = 0; guard < 60; guard++){
+      c.font = `900 ${px}px ${heroFont()}`;
+      lines = wrap(c, text, cw);
+      lead  = px * 0.86;
+      const widest = Math.max(...lines.map(l => c.measureText(l).width), 0);
+      if (lines.length * lead <= maxH && widest <= cw) break;
+      px *= 0.955;
+      if (px < 0.02 * W) break;
+    }
+    c.font = `900 ${px}px ${heroFont()}`;
+    const track  = -px * 0.02;
+    const blockH = lines.length * lead;
+    const top0   = topLim + (botLim - topLim - blockH) / 2 + px * 0.78;
+    lines.forEach((ln, i) => tracked(c, ln, W / 2, top0 + i * lead, track, 'center'));
+  }
+
+  /* Source Edge Blur: soften the mask before it enters the simulation. */
+  if (P.edgeBlur > 0.1){
+    scratchCanvas.width = W; scratchCanvas.height = H;
+    const sx = scratchCanvas.getContext('2d');
+    sx.filter = `blur(${P.edgeBlur}px)`;
+    sx.drawImage(heroCanvas, 0, 0);
+    c.clearRect(0, 0, W, H);
+    c.drawImage(scratchCanvas, 0, 0);
+  }
+
+  gl.bindTexture(gl.TEXTURE_2D, maskTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, heroCanvas);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  resetFluid();   // content changed — restart the simulation clean
+}
+
+/** Swiss/Brutalist metadata: kicker, date, top/bottom rules, serial, tick
+    index, rotated edge text, subtitle, crop + registration marks. */
+function drawPoster(W, H){
+  textCanvas.width = W; textCanvas.height = H;
+  const c = tctx;
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = '#fff'; c.strokeStyle = '#fff';
+  c.textBaseline = 'alphabetic';
+
+  const M    = 0.085 * W;               // margin
+  const hair = Math.max(1, 0.0016 * W); // hairline rule weight
+  const cw   = W - M * 2;               // content width
+
+  /* ── top band: kicker / date + rule ────────────────────────────────── */
+  const smallPx  = Math.round(0.0145 * W);
+  const topBase  = M + smallPx;
+  const topRuleY = M + 0.040 * W;
+
+  c.font = `600 ${smallPx}px ${metaFont()}`;
+  tracked(c, P.kicker, M,     topBase, smallPx * 0.20, 'left');
+  tracked(c, P.date,   W - M, topBase, smallPx * 0.20, 'right');
+
+  c.lineWidth = hair * 2;
+  c.beginPath(); c.moveTo(M, topRuleY); c.lineTo(W - M, topRuleY); c.stroke();
+
+  /* ── bottom band: serial + rule ─────────────────────────────────────── */
+  const botRuleY = H - M - 0.048 * W;
+  const botBase  = H - M;
+
+  c.lineWidth = hair * 2;
+  c.beginPath(); c.moveTo(M, botRuleY); c.lineTo(W - M, botRuleY); c.stroke();
+
+  c.font = `600 ${smallPx}px ${metaFont()}`;
+  tracked(c, P.serial, M,     botBase, smallPx * 0.20, 'left');
+  tracked(c, '↓ ' + P.aspect, W - M, botBase, smallPx * 0.20, 'right');
+
+  if (P.edge.trim()){
+    const ep = Math.round(0.0115 * W);
+    c.save();
+    c.translate(W - M * 0.44, botRuleY - 0.02 * W);
+    c.rotate(-Math.PI / 2);
+    c.font = `500 ${ep}px ${metaFont()}`;
+    c.globalAlpha = 0.85;
+    tracked(c, P.edge, 0, 0, ep * 0.30, 'left');
+    c.restore();
+    c.globalAlpha = 1;
+  }
+
+  const subPx  = Math.round(0.0225 * W);
+  const subLead = subPx * 1.32;
+  c.font = `400 ${subPx}px ${metaFont()}`;
+  const subLines = P.subtitle.trim() ? wrap(c, P.subtitle, cw * 0.62).slice(0, 4) : [];
+  const subTop   = botRuleY - 0.05 * W - subLines.length * subLead;
+  subLines.forEach((ln, i) => {
+    tracked(c, ln, M, subTop + (i + 1) * subLead, subPx * 0.012, 'left');
+  });
+
+  gl.bindTexture(gl.TEXTURE_2D, textTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   5. BRUSH / AUTO-SWEEP
+   ═══════════════════════════════════════════════════════════════════════ */
+const DRAG_VECS = { ttb:[0,-1], btt:[0,1], ltr:[1,0], rtl:[-1,0] };
+
+function ease(t, mode){
+  t = Math.min(1, Math.max(0, t));
+  if (mode === 'easein')  return t*t;
+  if (mode === 'easeout') return 1-(1-t)*(1-t);
+  if (mode === 'easeinout') return t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
+  return t;
+}
+
+/** Content lifecycle: appears slowly (ease-in), holds fully visible, then
+    melts away on a linear fade, looping. Drives uContentAlpha so the
+    source material itself — not just the fluid trail — breathes over
+    time, matching a piece of type/logo materialising and dissolving. */
+const APPEAR_END = 0.35, HOLD_END = 0.55;
+function contentEnvelope(t, speed){
+  const period = Math.max(0.6, 34 / Math.max(speed, 0.5));
+  const u = (t / period) % 1;
+  if (u < APPEAR_END) return ease(u / APPEAR_END, 'easein');
+  if (u < HOLD_END) return 1.0;
+  return Math.max(0, 1.0 - (u - HOLD_END) / (1.0 - HOLD_END));
+}
+let contentAlpha = 1;
+let forceContentVisible = false;   // export: pin the lifecycle envelope to fully-visible
+
+let pointerUV = {x:0.5,y:0.62}, pointerActive = false, pointerPrev = null, pointerVel = {x:0,y:0};
+function canvasToUV(clientX, clientY){
+  const r = canvas.getBoundingClientRect();
+  return { x:(clientX-r.left)/r.width, y:1-(clientY-r.top)/r.height };
+}
+canvas.addEventListener('pointermove', e => {
+  if (P.interactionMode !== 'manual') return;
+  const uv = canvasToUV(e.clientX, e.clientY);
+  if (pointerPrev) pointerVel = { x:(uv.x-pointerPrev.x)*35, y:(uv.y-pointerPrev.y)*35 };
+  pointerPrev = uv; pointerUV = uv; pointerActive = true;
+});
+canvas.addEventListener('pointerleave', () => { pointerActive = false; pointerPrev = null; pointerVel = {x:0,y:0}; });
+
+/** Returns { brush:{x,y} in poster-space, dragDir:{x,y} } for the current instant. */
+function computeFlow(t){
+  if (P.interactionMode === 'manual'){
+    const speed = Math.hypot(pointerVel.x, pointerVel.y);
+    const k = Math.min(1, speed * 1.2);
+    return {
+      brush: pointerUV,
+      dragDir: speed > 0.001 ? { x:(pointerVel.x/speed)*k, y:(pointerVel.y/speed)*k } : { x:0, y:0.12 }
+    };
+  }
+  const period = Math.max(0.35, 42 / Math.max(P.autoSpeed, 0.5));
+  let u;
+  if (P.autoLoopMode === 'pingpong'){
+    u = 1 - Math.abs(((t / period) % 2) - 1);
+  } else {
+    u = (t / period) % 1;
+  }
+  u = ease(u, P.autoEasing);
+  const d = DRAG_VECS[P.autoDirection] || DRAG_VECS.ttb;
+  let bx = 0.5, by = 0.62;
+  if (P.autoDirection === 'ttb'){ by = 1 - u; }
+  else if (P.autoDirection === 'btt'){ by = u; }
+  else if (P.autoDirection === 'ltr'){ bx = u; }
+  else if (P.autoDirection === 'rtl'){ bx = 1 - u; }
+  return { brush:{x:bx,y:by}, dragDir:{x:d[0],y:d[1]} };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   6. SIZING / RENDER LOOP
+   ═══════════════════════════════════════════════════════════════════════ */
+const POSTER_UNIT = 1400;
+let bufW = 0, bufH = 0;
+let phase = 0, last = performance.now(), running = true;
+
+function aspectRatio(){
+  const [a, b] = P.aspect.split(':').map(Number);
+  return a / b;
+}
+
+function layout(){
+  const stage = document.getElementById('stage');
+  const pad = 2 * parseFloat(getComputedStyle(stage).paddingLeft);
+  const availW = stage.clientWidth  - pad;
+  const availH = stage.clientHeight - pad;
+  const ar = aspectRatio();
+
+  let cssW = availW, cssH = cssW / ar;
+  if (cssH > availH){ cssH = availH; cssW = cssH * ar; }
+
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  setBufferSize(Math.round(cssW * dpr), Math.round(cssH * dpr));
+}
+
+function setBufferSize(w, h){
+  w = Math.max(2, Math.min(w, MAX_TEX));
+  h = Math.max(2, Math.min(h, MAX_TEX));
+  if (w === bufW && h === bufH) return;
+  bufW = canvas.width = w;
+  bufH = canvas.height = h;
+  resizeAllRT(w, h);
+  resetFluid();
+  drawPoster(w, h);
+  drawHeroMask(w, h);
+  document.getElementById('hudTxt').textContent =
+    `${P.aspect} · ${w}×${h} · SEED ${P.seed.toFixed(1)}`;
+}
+
+/** One fluid-sim step. Callable both from the live render loop and from
+    the export fast-forward loop (which uses a synthetic time value). */
+function stepFluid(t){
+  const flow = computeFlow(t);
+  contentAlpha = forceContentVisible ? 1 : contentEnvelope(t, P.contentCycleSpeed);
+
+  const src = rtFluid[fluidFront];
+  const dst = rtFluid[1 - fluidFront];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+  gl.viewport(0, 0, bufW, bufH);
+  gl.useProgram(progFluid);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex); i1(progFluid,'tPrev',0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex); i1(progFluid,'tMask',1);
+  f1(progFluid,'uAspect', bufW/bufH);
+  f2(progFluid,'uBrush', flow.brush.x * (bufW/bufH), flow.brush.y);
+  f1(progFluid,'uBrushRadius', P.brushRadius);
+  f1(progFluid,'uSmear', P.smearIntensity);
+  f1(progFluid,'uPersistence', P.burnOn ? P.persistence : 0.0);
+  f1(progFluid,'uWarp', P.fluidWarp);
+  f1(progFluid,'uWarpScale', P.warpScale);
+  f2(progFluid,'uDragDir', flow.dragDir.x, flow.dragDir.y);
+  f1(progFluid,'uTime', t);
+  f1(progFluid,'uSeed', P.seed);
+  f1(progFluid,'uContentAlpha', contentAlpha);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  fluidFront = 1 - fluidFront;
+}
+
+function renderFrame(){
+  const ar = bufW / bufH;
+
+  /* ── PASS A: fluid sim (one step per rendered frame) ─────────────────── */
+  if (P.burnOn && P.playing) stepFluid(phase);
+  else if (!P.burnOn) stepFluid(phase);   // keeps buffer decaying to plain mask (persistence forced 0 above)
+
+  /* ── PASS B: blur / glow — ping-pong H,V,H,V ─────────────────────────── */
+  const unitScale = bufH / POSTER_UNIT;
+  const radiusPx = Math.max(0, P.glowSoftness) * unitScale;
+  gl.useProgram(progBlur);
+  f1(progBlur,'uRadius', radiusPx);
+  f2(progBlur,'uTexel', 1 / bufW, 1 / bufH);
+  const fluidTex = rtFluid[fluidFront].tex;
+  const chain = [
+    [fluidTex,     rtBlurA, [1,0]],
+    [rtBlurA.tex,  rtBlurB, [0,1]],
+    [rtBlurB.tex,  rtBlurA, [1,0]],
+    [rtBlurA.tex,  rtBlurB, [0,1]],
+  ];
+  for (const [srcTex, dst, d] of chain){
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, bufW, bufH);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex); i1(progBlur,'tSrc',0);
+    f2(progBlur,'uDir', d[0], d[1]);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  const glowTex = rtBlurB.tex;
+
+  /* ── PASS C: thermal gradient map ─────────────────────────────────────── */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rtScene.fbo);
+  gl.viewport(0, 0, bufW, bufH);
+  gl.useProgram(progThermal);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fluidTex); i1(progThermal,'tFluid',0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glowTex);  i1(progThermal,'tGlow',1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex);  i1(progThermal,'tMask',2);
+  f3(progThermal,'uGround', hex3(P.ground));
+  f3(progThermal,'uInk', hex3(P.ink));
+  f3(progThermal,'uPrimary', hex3(P.glowPrimary));
+  f3(progThermal,'uSecondary', hex3(P.glowSecondary));
+  f1(progThermal,'uRgbSplit', P.rgbSplitGlow);
+  f1(progThermal,'uExposure', P.exposure);
+  f1(progThermal,'uFlat', P.burnOn ? 0 : 1);
+  f1(progThermal,'uContentAlpha', contentAlpha);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  /* ── PASS 2: scanner artifacts → screen ──────────────────────────────── */
+  const fx = P.scanOn ? 1 : 0;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, bufW, bufH);
+  gl.useProgram(progPost);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, rtScene.tex); i1(progPost,'tScene',0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, textTex);    i1(progPost,'tText',1);
+  f1(progPost,'uAspect', ar);
+  f1(progPost,'uUnit', POSTER_UNIT);
+  f1(progPost,'uTime', phase);
+  f1(progPost,'uSeed', P.seed);
+  f1(progPost,'uSplit', P.split * fx);
+  f1(progPost,'uGrain', P.grain * fx);
+  f1(progPost,'uScanAmt', P.scanAmt * fx);
+  f1(progPost,'uScanDens', P.scanDens);
+  f1(progPost,'uStreak', P.streak * fx);
+  f1(progPost,'uDust', P.dust * fx);
+  f1(progPost,'uScratch', P.scratch * fx);
+  f1(progPost,'uThresh', P.thresh * fx);
+  f1(progPost,'uContrast', P.scanOn ? P.contrast : 1.0);
+  f1(progPost,'uVig', P.vig * fx);
+  f1(progPost,'uJitter', P.jitter * fx);
+  f1(progPost,'uMode', P.textMode);
+  f3(progPost,'uInk', hex3(P.ink));
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function loop(now){
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  if (!P.frozen) phase += dt;
+  if (running) renderFrame();
+  requestAnimationFrame(loop);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   7. EXPORT — high-res PNG, with the fluid sim fast-forwarded to a
+   "settled" state so the export matches what extended on-screen play
+   would look like rather than a blank first frame.
+   ═══════════════════════════════════════════════════════════════════════ */
+function exportPNG(){
+  const ar = aspectRatio();
+  let H = P.exportH;
+  let W = Math.round(H * ar);
+  if (W > MAX_TEX || H > MAX_TEX){
+    const k = MAX_TEX / Math.max(W, H);
+    W = Math.floor(W * k); H = Math.floor(H * k);
+  }
+
+  const prevW = bufW, prevH = bufH;
+  const prevCssW = canvas.style.width, prevCssH = canvas.style.height;
+  const prevPhase = phase;
+
+  running = false;
+  forceContentVisible = true;   // a static export should never land mid-fade of the content cycle
+  setBufferSize(W, H);   // resets fluid buffers at the new resolution
+
+  if (P.burnOn && P.playing){
+    const target = 0.02;
+    const p = Math.min(Math.max(P.persistence, 0.5), 0.995);
+    const steps = Math.min(500, Math.max(40, Math.ceil(Math.log(target) / Math.log(p))));
+    const dt = 1 / 24;
+    let t = phase;
+    for (let i = 0; i < steps; i++){ t += dt; stepFluid(t); }
+    phase = t;
+  }
+
+  renderFrame();
+
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+    a.download = `radiant-burnt_${P.serial.replace(/[^\w]+/g,'-')}_${W}x${H}_${stamp}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+
+    phase = prevPhase;
+    forceContentVisible = false;
+    setBufferSize(prevW, prevH);
+    canvas.style.width = prevCssW; canvas.style.height = prevCssH;
+    running = true;
+  }, 'image/png');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   8. CONTROL PANEL (declarative — add a line here to add a control)
+   ═══════════════════════════════════════════════════════════════════════ */
+const CONTROLS = [
+ { title:'Radiant Burnt', items:[
+   { t:'toggle', k:'burnOn', l:'Enable Radiant Burnt Effect', big:true },
+ ]},
+ { title:'Content Source', items:[
+   { t:'segmented', k:'contentType', opts:[['text','Text'],['image','Image'],['svg','SVG']] },
+   { t:'textarea', k:'title', l:'Text Content', show:p=>p.contentType==='text' },
+   { t:'range', k:'fontSize', l:'Font Size', min:0.30, max:1.30, step:0.01, show:p=>p.contentType==='text' },
+   { t:'file', k:'imageAsset', l:'Logo / Image', accept:'image/*', show:p=>p.contentType==='image' },
+   { t:'file', k:'svgAsset', l:'SVG Logo', accept:'.svg,image/svg+xml', show:p=>p.contentType==='svg' },
+   { t:'range', k:'assetScale', l:'Asset Scale', min:0.2, max:2.0, step:0.01, show:p=>p.contentType!=='text' },
+   { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
+   { t:'font', k:'customFontHero', l:'Custom Font', accept:'.ttf,.otf,.woff,.woff2' },
+   { t:'range', k:'contentCycleSpeed', l:'Content Cycle Speed', min:1, max:30, step:0.5 },
+ ]},
+ { title:'Fluid & Interaction', items:[
+   { t:'segmented', k:'playing', l:'Animation', opts:[[true,'Pause'],[false,'Play']], invert:true },
+   { t:'segmented', k:'interactionMode', opts:[['manual','Manual'],['auto','Auto']] },
+   { t:'range', k:'autoSpeed', l:'Auto Speed', min:1, max:30, step:0.5, show:p=>p.interactionMode==='auto' },
+   { t:'select', k:'autoDirection', l:'Auto Direction', show:p=>p.interactionMode==='auto',
+     opts:[['ttb','Top to Bottom'],['btt','Bottom to Top'],['ltr','Left to Right'],['rtl','Right to Left']] },
+   { t:'segmented', k:'autoLoopMode', l:'Auto Loop Mode', opts:[['wrap','Wrap'],['pingpong','Ping-Pong']], show:p=>p.interactionMode==='auto' },
+   { t:'select', k:'autoEasing', l:'Auto Easing', show:p=>p.interactionMode==='auto',
+     opts:[['linear','Linear'],['easein','Ease In'],['easeout','Ease Out'],['easeinout','Ease In-Out']] },
+   { t:'range', k:'brushRadius', l:'Brush Radius', min:0.03, max:0.80, step:0.01 },
+   { t:'range', k:'smearIntensity', l:'Smear Intensity', min:0.00, max:0.50, step:0.005 },
+   { t:'range', k:'persistence', l:'Persistence (Decay)', min:0.50, max:0.99, step:0.002 },
+   { t:'range', k:'fluidWarp', l:'Fluid Warp', min:0.00, max:0.30, step:0.002 },
+   { t:'range', k:'warpScale', l:'Warp Scale', min:0.5, max:8.0, step:0.1 },
+ ]},
+ { title:'Optical Effects', items:[
+   { t:'colors', keys:[['glowPrimary','Primary Glow Color'],['glowSecondary','Secondary Glow Color'],['ground','Ground / Paper']] },
+   { t:'range', k:'rgbSplitGlow', l:'RGB Split (Aberration)', min:0, max:0.025, step:0.0005 },
+   { t:'range', k:'glowSoftness', l:'Glow Softness', min:0, max:60, step:0.5 },
+   { t:'range', k:'exposure', l:'Exposure (Burn)', min:0.0, max:2.5, step:0.01 },
+ ]},
+ { title:'Scanner Artifacts', items:[
+   { t:'toggle', k:'scanOn', l:'Enable Scanner Artifacts', big:true },
+   { t:'range', k:'grain',    l:'Grain Amount',        min:0, max:0.60, step:0.005 },
+   { t:'range', k:'split',    l:'RGB Split',           min:0, max:3.00, step:0.01 },
+   { t:'range', k:'scanAmt',  l:'Scanline Opacity',    min:0, max:0.70, step:0.005 },
+   { t:'range', k:'scanDens', l:'Scanline Density',    min:0.05, max:3.00, step:0.01 },
+   { t:'range', k:'dust',     l:'Dust Density',        min:0, max:2.00, step:0.01 },
+   { t:'range', k:'scratch',  l:'Scratches',           min:0, max:1.50, step:0.01 },
+   { t:'range', k:'streak',   l:'Streaks / Lamp Bar',  min:0, max:1.20, step:0.01 },
+   { t:'range', k:'thresh',   l:'Photocopy Bleed',     min:0, max:1.00, step:0.01 },
+   { t:'range', k:'contrast', l:'Contrast',            min:0.50, max:2.20, step:0.01 },
+   { t:'range', k:'vig',      l:'Vignette',            min:0, max:1.20, step:0.01 },
+   { t:'range', k:'jitter',   l:'Scan Jitter',         min:0, max:2.00, step:0.01 },
+ ]},
+ { title:'Metadata Typography', items:[
+   { t:'text', k:'subtitle', l:'Subtitle' },
+   { t:'text', k:'kicker',   l:'Kicker' },
+   { t:'text', k:'date',     l:'Date' },
+   { t:'text', k:'serial',   l:'Serial Number' },
+   { t:'text', k:'edge',     l:'Edge Text' },
+   { t:'colors', keys:[['ink','Ink Color']] },
+   { t:'select', k:'textMode', l:'Metadata Blend Mode', num:true,
+     opts:[['0','Normal'],['1','Multiply'],['2','Screen'],['3','Difference']] },
+   { t:'font', k:'customFontMeta', l:'Custom Font (override)', accept:'.ttf,.otf,.woff,.woff2' },
+ ]},
+ { title:'Output', items:[
+   { t:'select', k:'aspect', l:'Aspect Ratio',
+     opts:[['2:3','2:3 — ISO Poster'],['3:4','3:4'],['4:5','4:5'],['1:1','1:1 Square'],['210:297','A-Series']] },
+   { t:'select', k:'exportH', l:'Export Height', num:true,
+     opts:[['1600','1600 px'],['2400','2400 px'],['3200','3200 px'],['4200','4200 px']] },
+   { t:'toggle', k:'frozen', l:'Freeze Animation  (Space)' },
+   { t:'buttons', defs:[
+     ['Randomize Seed', 'seed'],
+     ['Randomize All',  'all'],
+   ]},
+   { t:'buttons', one:true, defs:[['↓  Export Poster PNG','export']] },
+ ]},
+];
+
+const ui = document.getElementById('ui');
+
+function fmt(v, spec){
+  if (spec.int) return String(Math.round(v));
+  return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(3).replace(/0+$/,'').replace(/\.$/,'.0');
+}
+
+const HERO_KEYS = new Set(['title','fontSize','aspect','contentType','assetScale','edgeBlur']);
+const TYPO_KEYS = new Set(['subtitle','kicker','date','serial','edge','aspect']);
+function touched(key){
+  if (key === 'aspect') layout();
+  if (HERO_KEYS.has(key)) drawHeroMask(bufW, bufH);
+  if (TYPO_KEYS.has(key)) drawPoster(bufW, bufH);
+  if (key === 'interactionMode') canvas.classList.toggle('manual', P.interactionMode === 'manual');
+}
+
+function loadAssetFile(file, kind){
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => { uploadedAsset = img; drawHeroMask(bufW, bufH); };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function buildUI(){
+  ui.innerHTML = '';
+  for (const sec of CONTROLS){
+    const s = document.createElement('section');
+    const h = document.createElement('h2');
+    h.textContent = sec.title;
+    h.onclick = () => s.classList.toggle('closed');
+    const body = document.createElement('div');
+    body.className = 'body';
+    s.append(h, body);
+
+    if (sec.items[0] && sec.items[0].t === 'toggle' && sec.items[0].big && !P[sec.items[0].k]) body.classList.add('dim');
+
+    for (const it of sec.items){
+      if (it.show && !it.show(P)) continue;
+
+      if (it.t === 'palettes'){
+        // (kept for potential future presets; unused in current layout)
+      }
+
+      else if (it.t === 'colors'){
+        for (const [k, label] of it.keys){
+          const row = document.createElement('div');
+          row.className = 'row';
+          row.innerHTML = `<label>${label}</label>`;
+          const inp = document.createElement('input');
+          inp.type = 'color'; inp.autocomplete = 'off'; inp.value = P[k];
+          inp.oninput = () => { P[k] = inp.value; touched(k); };
+          row.appendChild(inp);
+          body.appendChild(row);
+        }
+      }
+
+      else if (it.t === 'range'){
+        const slot = document.createElement('div');
+        slot.className = 'slot';
+        const row = document.createElement('div');
+        row.className = 'row';
+        const val = document.createElement('div');
+        val.className = 'val';
+        val.textContent = fmt(P[it.k], it);
+        row.innerHTML = `<label>${it.l}</label>`;
+        row.appendChild(val);
+        const inp = document.createElement('input');
+        inp.type = 'range'; inp.autocomplete = 'off';
+        inp.min = it.min; inp.max = it.max; inp.step = it.step; inp.value = P[it.k];
+        inp.oninput = () => {
+          P[it.k] = parseFloat(inp.value);
+          val.textContent = fmt(P[it.k], it);
+          touched(it.k);
+        };
+        slot.append(row, inp);
+        body.appendChild(slot);
+      }
+
+      else if (it.t === 'text'){
+        const f = document.createElement('div');
+        f.className = 'fld';
+        f.innerHTML = `<span>${it.l}</span>`;
+        const inp = document.createElement('input');
+        inp.type = 'text'; inp.autocomplete = 'off';
+        inp.value = P[it.k].replace(/\n/g, '\\n');
+        inp.oninput = () => { P[it.k] = inp.value.replace(/\\n/g, '\n'); touched(it.k); };
+        f.appendChild(inp);
+        body.appendChild(f);
+      }
+
+      else if (it.t === 'textarea'){
+        const f = document.createElement('div');
+        f.className = 'fld';
+        f.innerHTML = `<span>${it.l}</span>`;
+        const inp = document.createElement('textarea');
+        inp.autocomplete = 'off';
+        inp.value = P[it.k];
+        inp.oninput = () => { P[it.k] = inp.value; touched(it.k); };
+        f.appendChild(inp);
+        body.appendChild(f);
+      }
+
+      else if (it.t === 'select'){
+        const f = document.createElement('div');
+        f.className = 'fld';
+        f.innerHTML = `<span>${it.l}</span>`;
+        const sel = document.createElement('select');
+        sel.autocomplete = 'off';
+        sel.innerHTML = it.opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+        sel.value = String(P[it.k]);
+        sel.onchange = () => { P[it.k] = it.num ? parseFloat(sel.value) : sel.value; touched(it.k); buildUI(); };
+        f.appendChild(sel);
+        body.appendChild(f);
+      }
+
+      else if (it.t === 'segmented'){
+        if (it.l){
+          const lab = document.createElement('div');
+          lab.className = 'fld'; lab.style.marginBottom = '4px';
+          lab.innerHTML = `<span>${it.l}</span>`;
+          body.appendChild(lab);
+        }
+        const g = document.createElement('div');
+        g.className = 'seg';
+        for (const [val, label] of it.opts){
+          const b = document.createElement('button');
+          b.type = 'button'; b.textContent = label;
+          const isOn = it.invert ? (label==='Pause' ? P[it.k]===true : P[it.k]===false) : P[it.k] === val;
+          if (isOn) b.classList.add('on');
+          b.onclick = () => { P[it.k] = val; touched(it.k); buildUI(); };
+          g.appendChild(b);
+        }
+        body.appendChild(g);
+      }
+
+      else if (it.t === 'file'){
+        const f = document.createElement('div');
+        f.className = 'fld';
+        f.innerHTML = `<span>${it.l}</span>`;
+        const btn = document.createElement('div');
+        btn.className = 'filebtn';
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = 'Upload';
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = it.accept;
+        inp.onchange = () => { if (inp.files[0]) loadAssetFile(inp.files[0], it.k); };
+        const nm = document.createElement('span');
+        nm.className = 'name';
+        nm.textContent = uploadedAsset ? 'asset loaded' : 'no file selected';
+        btn.append(b, inp);
+        f.append(btn, nm);
+        body.appendChild(f);
+      }
+
+      else if (it.t === 'font'){
+        const f = document.createElement('div');
+        f.className = 'fld';
+        f.innerHTML = `<span>${it.l}</span>`;
+        const btn = document.createElement('div');
+        btn.className = 'filebtn';
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = 'Upload Font';
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = it.accept;
+        inp.onchange = () => { if (inp.files[0]) loadFontFile(inp.files[0], it.k); };
+        const nm = document.createElement('span');
+        nm.className = 'name';
+        nm.textContent = P[it.k] ? P[it.k] : 'default typeface';
+        btn.append(b, inp);
+        f.append(btn, nm);
+        body.appendChild(f);
+      }
+
+      else if (it.t === 'toggle'){
+        const lab = document.createElement('label');
+        lab.className = 'toggle' + (it.big ? ' big' : '');
+        const inp = document.createElement('input');
+        inp.type = 'checkbox'; inp.autocomplete = 'off'; inp.checked = !!P[it.k];
+        inp.onchange = () => { P[it.k] = inp.checked; touched(it.k); buildUI(); };
+        const sp = document.createElement('span');
+        sp.textContent = it.l;
+        lab.append(inp, sp);
+        body.appendChild(lab);
+      }
+
+      else if (it.t === 'buttons'){
+        const g = document.createElement('div');
+        g.className = 'btns' + (it.one ? ' one' : '');
+        for (const [label, action] of it.defs){
+          const b = document.createElement('button');
+          b.type = 'button'; b.textContent = label;
+          if (action === 'export') b.className = 'hot';
+          b.onclick = () => ACTIONS[action]();
+          g.appendChild(b);
+        }
+        body.appendChild(g);
+      }
+    }
+    ui.appendChild(s);
+  }
+}
+
+/* ── Actions ────────────────────────────────────────────────────────────── */
+const rnd  = (a, b) => a + Math.random() * (b - a);
+
+const ACTIONS = {
+  seed(){
+    P.seed = Math.random() * 500;
+    resetFluid();
+    document.getElementById('hudTxt').textContent = `${P.aspect} · ${bufW}×${bufH} · SEED ${P.seed.toFixed(1)}`;
+  },
+  all(){
+    ACTIONS.seed();
+    P.brushRadius     = rnd(0.06, 0.35);
+    P.smearIntensity  = rnd(0.05, 0.35);
+    P.persistence     = rnd(0.80, 0.97);
+    P.fluidWarp       = rnd(0.0, 0.18);
+    P.warpScale       = rnd(1, 6);
+    P.autoDirection   = ['ttb','btt','ltr','rtl'][Math.floor(rnd(0,4))];
+    P.autoEasing      = ['linear','easein','easeout','easeinout'][Math.floor(rnd(0,4))];
+    P.glowPrimary     = '#'+Math.floor(rnd(0,0xffffff)).toString(16).padStart(6,'0');
+    P.glowSecondary   = '#'+Math.floor(rnd(0,0xffffff)).toString(16).padStart(6,'0');
+    P.exposure        = rnd(0.6, 1.8);
+    P.rgbSplitGlow    = rnd(0.0, 0.015);
+    P.split       = rnd(0.20, 1.30);
+    P.grain       = rnd(0.08, 0.28);
+    P.dust        = rnd(0.15, 0.90);
+    P.scratch     = rnd(0.10, 0.80);
+    P.thresh      = rnd(0.00, 0.42);
+    buildUI();
+  },
+  reset(){
+    Object.assign(P, JSON.parse(JSON.stringify(DEFAULTS)));
+    uploadedAsset = null;
+    buildUI();
+    layout();
+    drawPoster(bufW, bufH);
+    drawHeroMask(bufW, bufH);
+    canvas.classList.toggle('manual', P.interactionMode === 'manual');
+  },
+  export: exportPNG
+};
+document.getElementById('resetBtn').onclick = ACTIONS.reset;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   9. BOOT
+   ═══════════════════════════════════════════════════════════════════════ */
+buildUI();
+layout();
+
+/* Some browsers restore <input>/<select> values (ranges, checkboxes,
+   colors, dropdowns) on reload via a positional heuristic — even for
+   elements created dynamically after load, and even inside a form with
+   autocomplete="off". Critically, that restoration fires real input/change
+   events, which run the normal control handlers and write the restored
+   (stale) value straight into P — so merely re-rendering the DOM from P a
+   moment later just faithfully redisplays the corruption. The reliable
+   fix is to force P itself back to defaults (keeping the freshly-rolled
+   seed) shortly after load, then rebuild from that. */
+function resyncFromDefaults(){
+  const seed = P.seed;
+  Object.assign(P, JSON.parse(JSON.stringify(DEFAULTS)));
+  P.seed = seed;
+  buildUI();
+  drawPoster(bufW, bufH);
+  drawHeroMask(bufW, bufH);
+  canvas.classList.toggle('manual', P.interactionMode === 'manual');
+}
+requestAnimationFrame(() => requestAnimationFrame(resyncFromDefaults));
+setTimeout(resyncFromDefaults, 350);
+setTimeout(resyncFromDefaults, 900);
+setTimeout(resyncFromDefaults, 1800);
+
+let rzTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(rzTimer);
+  rzTimer = setTimeout(layout, 90);
+});
+
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {
+  drawPoster(bufW, bufH);
+  drawHeroMask(bufW, bufH);
+});
+
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input,select,textarea')) return;
+  if (e.code === 'Space'){ e.preventDefault(); P.frozen = !P.frozen; buildUI(); }
+  if (e.key === 'r' || e.key === 'R') ACTIONS.seed();
+  if (e.key === 'e' || e.key === 'E') exportPNG();
+});
+
+requestAnimationFrame(loop);
+</script>
