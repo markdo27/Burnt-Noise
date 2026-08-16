@@ -223,8 +223,6 @@ const P = {
   assetScale:1.0,
   edgeBlur:2,
   customFontHero:null,      // font-family name once a custom font is loaded, else null
-  contentCycleSpeed:8,      // downward reveal/erase sweep rate
-  sweepSoftness:0.14,       // feather on the sweep edges (0 = hard wipe line)
 
   // ── Fluid & Interaction ──
   playing:true,
@@ -280,13 +278,21 @@ void main(){
    genuinely "nothing shown" and "everything shown" rather than stopping a
    half soft-edge short. vUv.y is 0 at the BOTTOM of the frame.        */
 const SWEEP = `
+uniform float uSweepReveal, uSweepHide, uSweepSoft;
+uniform vec2  uSweepAxis;
+uniform float uSweepBias;
+
 float sweepLine(float p, float soft){ return 1.0 + soft - p * (1.0 + 2.0 * soft); }
-float contentSweep(float y, float reveal, float hide, float soft){
+
+/* Project uv onto the sweep axis so the wipe follows Auto Direction, then
+   apply the reveal edge and the trailing erase edge. */
+float contentSweep(vec2 uv, float reveal, float hide, float soft){
+  float c = uSweepBias + dot(uv, uSweepAxis);
   soft = max(soft, 0.0005);
   float lr = sweepLine(reveal, soft);
   float lh = sweepLine(hide,   soft);
-  float r = smoothstep(lr - soft, lr + soft, y);          // shown above the reveal edge
-  float h = 1.0 - smoothstep(lh - soft, lh + soft, y);    // erased above the erase edge
+  float r = smoothstep(lr - soft, lr + soft, c);          // shown ahead of the reveal edge
+  float h = 1.0 - smoothstep(lh - soft, lh + soft, c);    // erased behind the erase edge
   return clamp(r * h, 0.0, 1.0);
 }
 `;
@@ -348,7 +354,6 @@ uniform float uPersistence;
 uniform float uWarp;
 uniform float uWarpScale;
 uniform vec2  uDragDir;
-uniform float uSweepReveal, uSweepHide, uSweepSoft;
 uniform float uDither;      // 1.0 only on the 8-bit fallback path
 uniform float uTime;
 uniform float uSeed;
@@ -395,7 +400,7 @@ void main(){
      independent. The crisp core is composited separately downstream from
      the raw mask, so this buffer is purely the flowing trail.        */
   const float INFLOW = 3.0;
-  float ca = contentSweep(vUv.y, uSweepReveal, uSweepHide, uSweepSoft);
+  float ca = contentSweep(vUv, uSweepReveal, uSweepHide, uSweepSoft);
   float inject = fresh * clamp(influence, 0.0, 1.0) * ca;
   float result = min(advected * uPersistence + inject * (1.0 - uPersistence) * INFLOW, 1.0);
 
@@ -501,8 +506,6 @@ uniform vec3  uPrimary, uSecondary;
 uniform float uRgbSplit;
 uniform float uExposure;    // Exposure (Burn)
 uniform float uFlat;        // 1.0 = bypass the ramp, show plain flat ink content
-uniform float uSweepReveal, uSweepHide, uSweepSoft;   // content wipe, see contentSweep()
-
 ${SWEEP}
 
 vec3 blendScreen(vec3 b, vec3 s){ return 1.0 - (1.0 - b) * (1.0 - s); }
@@ -533,7 +536,7 @@ vec3 thermalAt(vec2 uv){
      with the fluid trail — the fluid buffer only ever holds brush-weighted
      material, so without this the core would fade wherever the brush
      currently isn't. */
-  float core = max(texture2D(tMask, uv).a * contentSweep(uv.y, uSweepReveal, uSweepHide, uSweepSoft),
+  float core = max(texture2D(tMask, uv).a * contentSweep(uv, uSweepReveal, uSweepHide, uSweepSoft),
                    texture2D(tFluid, uv).a);
   float glow = texture2D(tGlow, uv).a;
   float t = clamp(core + glow * 0.85, 0.0, 1.0);
@@ -547,7 +550,7 @@ vec3 thermalAt(vec2 uv){
 
 void main(){
   if (uFlat > 0.5){
-    float core = texture2D(tMask, vUv).a * contentSweep(vUv.y, uSweepReveal, uSweepHide, uSweepSoft);
+    float core = texture2D(tMask, vUv).a * contentSweep(vUv, uSweepReveal, uSweepHide, uSweepSoft);
     gl_FragColor = vec4(mix(uGround, uInk, core), 1.0);
     return;
   }
@@ -1006,17 +1009,41 @@ function drawHeroMask(W, H){
   const cw = W - M * 2;
 
   if ((P.contentType === 'image' || P.contentType === 'svg') && uploadedAsset){
-    const iw = uploadedAsset.naturalWidth || uploadedAsset.width;
-    const ih = uploadedAsset.naturalHeight || uploadedAsset.height;
-    if (iw > 0 && ih > 0){
+    /* SVGs are normalised on upload to always carry intrinsic dimensions,
+       but keep a fallback so a pathological asset can never divide by zero. */
+    const iw = uploadedAsset.naturalWidth  || uploadedAsset.width  || 1000;
+    const ih = uploadedAsset.naturalHeight || uploadedAsset.height || 1000;
+    {
       const fitW = W * 0.72 * P.assetScale;
       const fitH = fitW * (ih / iw);
       c.drawImage(uploadedAsset, (W - fitW) / 2, (H - fitH) / 2, fitW, fitH);
       const id = c.getImageData(0, 0, W, H);
       const d = id.data;
+
+      /* Work out what "coverage" means for THIS asset.
+         A logo — SVG or cut-out PNG — carries its shape in the ALPHA channel
+         and is very often solid black. Scoring that by luminance gives 0
+         across the whole logo, i.e. an empty mask, which is exactly why an
+         uploaded SVG looked like the effect was broken. So: use alpha
+         whenever the asset has any transparency, and only fall back to
+         luminance for a fully opaque image (a photo). In that opaque case,
+         flip polarity when the picture is predominantly light, so a dark
+         subject on a white ground becomes the shape instead of the ground. */
+      let hasAlpha = false, lumSum = 0;
+      const px = d.length / 4;
       for (let i = 0; i < d.length; i += 4){
-        const a = d[i + 3];
-        const cov = a < 250 ? a : (d[i]*0.2126 + d[i+1]*0.7152 + d[i+2]*0.0722);
+        if (d[i+3] < 250) hasAlpha = true;
+        lumSum += d[i]*0.2126 + d[i+1]*0.7152 + d[i+2]*0.0722;
+      }
+      const invert = !hasAlpha && (lumSum / Math.max(px,1)) > 127.5;
+
+      for (let i = 0; i < d.length; i += 4){
+        let cov;
+        if (hasAlpha) cov = d[i+3];
+        else {
+          const l = d[i]*0.2126 + d[i+1]*0.7152 + d[i+2]*0.0722;
+          cov = invert ? 255 - l : l;
+        }
         d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = cov;
       }
       c.putImageData(id, 0, 0);
@@ -1140,21 +1167,24 @@ function ease(t, mode){
   return t;
 }
 
-/** Content lifecycle as a DOWNWARD SWEEP rather than a global fade: a reveal
-    edge descends from the top to bring the content in, it holds, then an
-    erase edge follows it down to take it away — so the source itself wipes
-    on and off in the same direction the fluid melts. Returns the two edge
-    positions (0..1 each); the spatial shaping happens in contentSweep(). */
+/* Content wipe phase boundaries within one cycle: reveal, then hold, then
+   erase. Driven by the SAME cycle as the brush (see computeAnim). */
 const APPEAR_END = 0.38, HOLD_END = 0.56;
-function contentPhase(t, speed){
-  const period = Math.max(0.6, 34 / Math.max(speed, 0.5));
-  const u = (t / period) % 1;
-  if (u < APPEAR_END) return { reveal: ease(u / APPEAR_END, 'easeinout'), hide: 0 };
-  if (u < HOLD_END)   return { reveal: 1, hide: 0 };
-  return { reveal: 1, hide: (u - HOLD_END) / (1.0 - HOLD_END) };
-}
+
+/* Projection that turns a uv into "distance ahead of the sweep" for each
+   direction, so the content wipe travels along the same axis the brush
+   does. coord = bias + dot(uv, axis); the sweep reveals where coord is
+   large, so coord == 1 is the edge the sweep starts from. */
+const SWEEP_AXIS = {
+  ttb: { axis:[ 0,  1], bias:0 },   // starts at the top
+  btt: { axis:[ 0, -1], bias:1 },   // starts at the bottom
+  ltr: { axis:[-1,  0], bias:1 },   // starts at the left
+  rtl: { axis:[ 1,  0], bias:0 },   // starts at the right
+};
+
 const SWEEP_FULL = { reveal: 1, hide: 0 };
 let sweep = SWEEP_FULL;
+let sweepAxis = SWEEP_AXIS.ttb;
 let forceContentVisible = false;   // export: pin the sweep to fully-revealed
 
 let pointerUV = {x:0.5,y:0.62}, pointerActive = false, pointerPrev = null, pointerVel = {x:0,y:0};
@@ -1170,32 +1200,58 @@ canvas.addEventListener('pointermove', e => {
 });
 canvas.addEventListener('pointerleave', () => { pointerActive = false; pointerPrev = null; pointerVel = {x:0,y:0}; });
 
-/** Returns { brush:{x,y} in poster-space, dragDir:{x,y} } for the current instant. */
-function computeFlow(t){
+/** ONE animation cycle drives everything.
+    Previously the brush ran off Auto Speed/Direction/Loop/Easing while the
+    content wipe ran off its own separate speed and softness — two clocks
+    for one motion, which is why it never felt cohesive. Now Auto Speed,
+    Auto Direction, Auto Loop Mode and Auto Easing govern the brush AND the
+    content reveal/erase together, and the wipe's edge feather comes from
+    Brush Radius so the wipe is literally as soft as the brush painting it.
+
+    In Manual mode there is no cycle: the content simply stays present and
+    the pointer does the melting.
+
+    Returns { brush, dragDir, sweep, axis }. */
+function computeAnim(t){
+  const dirKey = DRAG_VECS[P.autoDirection] ? P.autoDirection : 'ttb';
+  const d  = DRAG_VECS[dirKey];
+  const ax = SWEEP_AXIS[dirKey];
+
   if (P.interactionMode === 'manual'){
     const speed = Math.hypot(pointerVel.x, pointerVel.y);
     const k = Math.min(1, speed * 1.2);
     return {
       brush: pointerUV,
-      dragDir: speed > 0.001 ? { x:(pointerVel.x/speed)*k, y:(pointerVel.y/speed)*k } : { x:0, y:0.12 }
+      dragDir: speed > 0.001 ? { x:(pointerVel.x/speed)*k, y:(pointerVel.y/speed)*k } : { x:0, y:0.12 },
+      sweep: SWEEP_FULL,
+      axis: ax
     };
   }
+
   const period = Math.max(0.35, 42 / Math.max(P.autoSpeed, 0.5));
-  let u;
-  if (P.autoLoopMode === 'pingpong'){
-    u = 1 - Math.abs(((t / period) % 2) - 1);
-  } else {
-    u = (t / period) % 1;
-  }
-  u = ease(u, P.autoEasing);
-  const d = DRAG_VECS[P.autoDirection] || DRAG_VECS.ttb;
+  const raw = (P.autoLoopMode === 'pingpong')
+    ? 1 - Math.abs(((t / period) % 2) - 1)
+    : (t / period) % 1;
+  const u = ease(raw, P.autoEasing);
+
   let bx = 0.5, by = 0.62;
-  if (P.autoDirection === 'ttb'){ by = 1 - u; }
-  else if (P.autoDirection === 'btt'){ by = u; }
-  else if (P.autoDirection === 'ltr'){ bx = u; }
-  else if (P.autoDirection === 'rtl'){ bx = 1 - u; }
-  return { brush:{x:bx,y:by}, dragDir:{x:d[0],y:d[1]} };
+  if      (dirKey === 'ttb') by = 1 - u;
+  else if (dirKey === 'btt') by = u;
+  else if (dirKey === 'ltr') bx = u;
+  else if (dirKey === 'rtl') bx = 1 - u;
+
+  /* The wipe rides the same eased progress, so Auto Easing shapes how the
+     content comes in and goes out exactly as it shapes the brush travel. */
+  let sw;
+  if      (u < APPEAR_END) sw = { reveal: u / APPEAR_END, hide: 0 };
+  else if (u < HOLD_END)   sw = { reveal: 1, hide: 0 };
+  else                     sw = { reveal: 1, hide: (u - HOLD_END) / (1 - HOLD_END) };
+
+  return { brush:{x:bx,y:by}, dragDir:{x:d[0],y:d[1]}, sweep: sw, axis: ax };
 }
+
+/** Wipe edge feather, derived from Brush Radius rather than its own slider. */
+function sweepSoftness(){ return Math.min(0.5, Math.max(0.03, P.brushRadius * 0.9)); }
 
 /* ══════════════════════════════════════════════════════════════════════════
    6. SIZING / RENDER LOOP
@@ -1248,8 +1304,9 @@ function updateHud(){
 /** One fluid-sim step. Callable both from the live render loop and from
     the export fast-forward loop (which uses a synthetic time value). */
 function stepFluid(t){
-  const flow = computeFlow(t);
-  sweep = forceContentVisible ? SWEEP_FULL : contentPhase(t, P.contentCycleSpeed);
+  const flow = computeAnim(t);
+  sweep = forceContentVisible ? SWEEP_FULL : flow.sweep;
+  sweepAxis = flow.axis;
 
   const src = rtFluid[fluidFront];
   const dst = rtFluid[1 - fluidFront];
@@ -1272,7 +1329,9 @@ function stepFluid(t){
   f1(progFluid,'uSeed', P.seed);
   f1(progFluid,'uSweepReveal', sweep.reveal);
   f1(progFluid,'uSweepHide', sweep.hide);
-  f1(progFluid,'uSweepSoft', P.sweepSoftness);
+  f1(progFluid,'uSweepSoft', sweepSoftness());
+  f2(progFluid,'uSweepAxis', sweepAxis.axis[0], sweepAxis.axis[1]);
+  f1(progFluid,'uSweepBias', sweepAxis.bias);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   fluidFront = 1 - fluidFront;
 }
@@ -1355,7 +1414,9 @@ function renderFrame(){
   f1(progThermal,'uFlat', P.burnOn ? 0 : 1);
   f1(progThermal,'uSweepReveal', sweep.reveal);
   f1(progThermal,'uSweepHide', sweep.hide);
-  f1(progThermal,'uSweepSoft', P.sweepSoftness);
+  f1(progThermal,'uSweepSoft', sweepSoftness());
+  f2(progThermal,'uSweepAxis', sweepAxis.axis[0], sweepAxis.axis[1]);
+  f1(progThermal,'uSweepBias', sweepAxis.bias);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   /* ── PASS 2: scanner artifacts → screen ──────────────────────────────── */
@@ -1459,8 +1520,6 @@ const CONTROLS = [
    { t:'range', k:'assetScale', l:'Asset Scale', min:0.2, max:2.0, step:0.01, show:p=>p.contentType!=='text' },
    { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
    { t:'font', k:'customFontHero', l:'Custom Font', accept:'.ttf,.otf,.woff,.woff2' },
-   { t:'range', k:'contentCycleSpeed', l:'Sweep Speed', min:1, max:30, step:0.5 },
-   { t:'range', k:'sweepSoftness', l:'Sweep Softness', min:0, max:0.60, step:0.005 },
  ]},
  { title:'Fluid & Interaction', items:[
    { t:'segmented', k:'playing', l:'Animation', opts:[[true,'Pause'],[false,'Play']], invert:true },
@@ -1471,7 +1530,7 @@ const CONTROLS = [
    { t:'segmented', k:'autoLoopMode', l:'Auto Loop Mode', opts:[['wrap','Wrap'],['pingpong','Ping-Pong']], show:p=>p.interactionMode==='auto' },
    { t:'select', k:'autoEasing', l:'Auto Easing', show:p=>p.interactionMode==='auto',
      opts:[['linear','Linear'],['easein','Ease In'],['easeout','Ease Out'],['easeinout','Ease In-Out']] },
-   { t:'range', k:'brushRadius', l:'Brush Radius', min:0.03, max:0.80, step:0.01 },
+   { t:'range', k:'brushRadius', l:'Brush Radius (+ wipe feather)', min:0.03, max:0.80, step:0.01 },
    { t:'range', k:'smearIntensity', l:'Smear Intensity', min:0.00, max:0.50, step:0.005 },
    { t:'range', k:'persistence', l:'Persistence (Decay)', min:0.50, max:0.99, step:0.002 },
    { t:'range', k:'fluidWarp', l:'Fluid Warp', min:0.00, max:0.30, step:0.002 },
@@ -1538,14 +1597,54 @@ function touched(key){
   if (key === 'interactionMode') canvas.classList.toggle('manual', P.interactionMode === 'manual');
 }
 
+/** Many SVGs ship with only a viewBox and no width/height. Loaded into an
+    <img> those report an unreliable intrinsic size (0 in some engines, a
+    300x150 default in others), so the asset lands at the wrong scale or not
+    at all. Inject concrete dimensions derived from the viewBox before use. */
+function normalizeSvg(text){
+  try {
+    const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+    const svg = doc.documentElement;
+    if (!svg || svg.nodeName.toLowerCase() !== 'svg') return text;
+    if (doc.getElementsByTagName('parsererror').length) return text;
+
+    const vb  = (svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    const bad = v => !v || /%\s*$/.test(v) || !parseFloat(v);
+    let w = svg.getAttribute('width'), h = svg.getAttribute('height');
+
+    if (bad(w) || bad(h)){
+      if (vb.length === 4 && vb[2] > 0 && vb[3] > 0){ w = String(vb[2]); h = String(vb[3]); }
+      else { w = '1000'; h = '1000'; }
+      svg.setAttribute('width', w);
+      svg.setAttribute('height', h);
+    }
+    if (!svg.getAttribute('viewBox') && parseFloat(w) && parseFloat(h)){
+      svg.setAttribute('viewBox', `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
+    }
+    return new XMLSerializer().serializeToString(svg);
+  } catch(e){ return text; }
+}
+
+let assetError = '';
 function loadAssetFile(file, kind){
+  const isSvg = /svg/i.test(file.type) || /\.svg$/i.test(file.name);
   const reader = new FileReader();
   reader.onload = () => {
+    const src = isSvg
+      ? 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(normalizeSvg(reader.result))
+      : reader.result;
     const img = new Image();
-    img.onload = () => { uploadedAsset = img; drawHeroMask(bufW, bufH); };
-    img.src = reader.result;
+    img.onload = () => {
+      uploadedAsset = img; assetError = '';
+      drawHeroMask(bufW, bufH);
+      buildUI();
+    };
+    // Fail loudly in the panel rather than silently showing an empty poster.
+    img.onerror = () => { assetError = 'could not decode this file'; buildUI(); };
+    img.src = src;
   };
-  reader.readAsDataURL(file);
+  reader.onerror = () => { assetError = 'could not read this file'; buildUI(); };
+  if (isSvg) reader.readAsText(file); else reader.readAsDataURL(file);
 }
 
 function buildUI(){
@@ -1673,7 +1772,9 @@ function buildUI(){
         inp.onchange = () => { if (inp.files[0]) loadAssetFile(inp.files[0], it.k); };
         const nm = document.createElement('span');
         nm.className = 'name';
-        nm.textContent = uploadedAsset ? 'asset loaded' : 'no file selected';
+        nm.textContent = assetError ? ('⚠ ' + assetError)
+                       : uploadedAsset ? 'asset loaded' : 'no file selected';
+        if (assetError) nm.style.color = 'var(--hot)';
         btn.append(b, inp);
         f.append(btn, nm);
         body.appendChild(f);
