@@ -270,7 +270,12 @@ const P = {
      permanently past yield and the field settles into steady flow; close
      to it, columns cross back and forth and the melt keeps re-forming. */
   meltHeat:0.35,            // heat input rate
-  meltScale:2.2,            // size of the hot / cold patches
+  /* Hot patches need to be SMALLER than the letterforms. At 2.2 the noise
+     ran about two cycles across the whole poster, so heat was effectively
+     uniform inside any single glyph and the glyph just translated as a
+     rigid body — no visible deformation, which is why the melt looked
+     static however fast it was running. */
+  meltScale:6.5,            // size of the hot / cold patches
   meltPoint:0.30,           // heat at which the material yields
   meltGravity:0.45,
   meltVisc:1.30,            // viscous drag
@@ -753,12 +758,22 @@ void main(){
 
   /* ── MASS TRANSPORT (upwind) ───────────────────────────────────────────
      Flux out is mass * velocity; flux in is the same quantity taken from
-     the cell above. Solid material relaxes back toward the artwork's own
-     coverage so the un-melted part stays anchored to the shape. */
+     the cell above.
+
+     The anchor toward coverage only applies WHERE THERE IS COVERAGE. It
+     used to apply everywhere, which quietly forbade the whole point of the
+     simulation: outside the letterforms coverage is zero, so any material
+     transported down there was immediately pulled back to nothing. Runs
+     could never leave the shape they came from, so instead of drips the
+     sim could only shuffle material inside the glyphs. Beyond the shape,
+     transported mass now persists and thins out slowly, which is what lets
+     a run actually hang below the letter that fed it. */
+  float hasCov  = smoothstep(0.0, 0.02, cov);
   float fluxIn  = sUp.z * max(sUp.y, 0.0);
   float fluxOut = mass  * max(vel,   0.0);
   mass += (fluxIn - fluxOut) * uFlow * uDt;
-  mass  = mix(mass, cov, uDt * 0.25 * (1.0 - melted));
+  mass  = mix(mass, cov, uDt * 0.25 * (1.0 - melted) * hasCov);
+  mass *= 1.0 - uDt * 0.20 * (1.0 - hasCov);
   mass  = clamp(mass, 0.0, 1.0);
 
   /* ── DISPLACEMENT TRAVELS WITH THE MATERIAL ────────────────────────────
@@ -797,11 +812,23 @@ void main(){
      closes the loop: heat, yield, run, cool, set, reheat — every stage a
      consequence of the physics rather than a scripted animation. */
 
-  /* ── SURFACE TENSION ───────────────────────────────────────────────── */
-  disp += (sL.x + sR.x - 2.0 * disp) * uTension * uDt * 60.0;
+  /* ── SURFACE TENSION ───────────────────────────────────────────────────
+     Now in both axes. Smoothing only left-to-right left the field free to
+     step sharply between one row and the next, and it is vertical steps
+     that the read offset turns into hard horizontal seams. */
+  disp += (sL.x + sR.x + sUp.x + sDn.x - 4.0 * disp) * uTension * uDt * 30.0;
 
-  /* No material, nothing to melt. */
-  float alive = step(0.004, max(mass, cov));
+  /* ── EDGE FALLOFF ──────────────────────────────────────────────────────
+     THE CHROME-EDGE FIX. This was a hard step(): displacement went from
+     its full value to zero across a single texel at the boundary of the
+     shape. The post pass reads the frame at an offset taken from this
+     field, so a discontinuity here becomes a discontinuity in the image —
+     which is exactly the metallic outline it was drawing around every
+     letter, with the interior merely translated and therefore looking
+     untouched. A smooth falloff means the offset eases to zero instead of
+     dropping off a cliff, so the material deforms rather than being
+     stamped out. */
+  float alive = smoothstep(0.0, 0.06, max(mass, cov));
   gl_FragColor = vec4(clamp(disp, 0.0, 1.0) * alive, vel * alive, mass, heat);
 }`;
 
@@ -861,18 +888,39 @@ float ign(vec2 p){
    a POSITIVE y offset pulls content downward.                            */
 vec2 meltUV(vec2 p, float amt){
   if (amt <= 0.0) return p;
+
   /* The displacement is read out of the simulation rather than generated
-     here. Sampling from ABOVE is still what makes it read as sagging: the
-     material now at p is the material that used to be at p + d. */
-  float d = texture2D(tMelt, p).x * amt;
+     here. Sampling from ABOVE is what makes it read as sagging: the
+     material now at p is the material that used to be at p + d.
 
-  /* Lateral slide follows the slope of the run, so material spilling off a
-     steep shoulder drifts sideways instead of dropping straight down. */
-  float dx = texture2D(tMelt, p + vec2(0.004, 0.0)).x
-           - texture2D(tMelt, p - vec2(0.004, 0.0)).x;
+     Read through a small cross rather than a single tap. The field has a
+     falloff at the boundary of the shape, and a single tap turns that into
+     a step in the READ COORDINATE — which the image reproduces as a hard
+     seam tracing the outline. Averaging a few taps costs four lookups and
+     removes the seam at its source. */
+  float d = (texture2D(tMelt, p).x * 2.0
+           + texture2D(tMelt, p + vec2( 0.0035, 0.0)).x
+           + texture2D(tMelt, p + vec2(-0.0035, 0.0)).x
+           + texture2D(tMelt, p + vec2(0.0,  0.0035)).x
+           + texture2D(tMelt, p + vec2(0.0, -0.0035)).x) / 6.0;
 
-  p.y += d;
-  p.x += dx * amt * 0.5;
+  /* Lateral slide follows the slope of the run — material spilling off a
+     steep shoulder drifts sideways instead of dropping straight down.
+
+     THE CHROME-RIM FIX. This was a raw finite difference multiplied by the
+     full melt amount. The displacement field's steepest gradients sit
+     exactly on the outline of the shape, so the sideways shift spiked at
+     every boundary and tore a hard rim around every letter — the metallic
+     edge, with the interior merely translated underneath it. Widening Melt
+     Amount's range multiplied that rim by the same factor. It is a slope
+     now: divided by the sampling distance, clamped so a boundary cannot
+     produce an unbounded shift, and scaled far more conservatively. */
+  float slope = (texture2D(tMelt, p + vec2(0.0035, 0.0)).x
+               - texture2D(tMelt, p - vec2(0.0035, 0.0)).x) / 0.007;
+  slope = clamp(slope, -1.5, 1.5);
+
+  p.y += d * amt;
+  p.x += slope * amt * 0.06;
   return p;
 }
 
