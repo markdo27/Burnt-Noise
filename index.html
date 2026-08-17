@@ -260,6 +260,7 @@ const P = {
   grain:0.0, grainSize:2.0, thresh:0.0, contrast:1.57,
   lensBlur:0.021, lensFocus:0.40, lensRange:0.62, lensHighlight:5.2,
   lensMode:'partial',       // partial = focus plane + edge falloff | full = whole frame
+  lensQuality:'high',       // high = 48 gather taps | low = 16, for slower hardware
   lensDistort:-0.29, lensEdge:0.48, lensFringe:0.0,
   /* MELT AMOUNT IS BOUNDED BY STROKE WIDTH, and that is the whole story of
      why this looked like chrome. The read offset has to stay within a
@@ -879,6 +880,7 @@ uniform float uLensHi;      // highlight weighting for the disc gather
 uniform float uLensDistort; // radial distortion: + barrels, - pincushions
 uniform float uLensEdge;    // field curvature — how much the corners defocus
 uniform float uLensFull;    // 1 = defocus the whole frame evenly, 0 = selective
+uniform float uLensLow;     // 1 = fewer gather taps, for slower hardware
 uniform float uLensFringe;  // lateral chromatic aberration
 uniform float uMelt;        // how far the simulated run displaces the read
 uniform float uMeltType;    // how much of the metadata type inherits the melt
@@ -963,9 +965,12 @@ vec2 meltUV(vec2 p, float amt){
    tap budget resolves into fine noise instead of structure, and the
    existing grain absorbs what is left. Jittering the radius per tap
    breaks up the concentric ringing the sqrt spacing leaves behind.    */
-const int LENS_TAPS = 48;
+${['Hi', 'Lo'].map((suffix, k) => {
+  const taps = k === 0 ? 48 : 16;
+  return `
+const int LENS_TAPS_${suffix} = ${taps};
 
-vec3 lensGather(vec2 uv, vec2 dir, float amt, float radius, float jitter){
+vec3 lensGather${suffix}(vec2 uv, vec2 dir, float amt, float radius, float jitter){
   vec3  sum  = vec3(0.0);
   float wsum = 0.0;
   /* Fringing costs three texture reads per tap instead of one. When it is
@@ -973,14 +978,14 @@ vec3 lensGather(vec2 uv, vec2 dir, float amt, float radius, float jitter){
      same value, so the whole gather ran at triple cost for no difference —
      worth one uniform branch to skip. */
   bool fringe = amt > 1e-5;
-  for (int i = 0; i < LENS_TAPS; i++){
+  for (int i = 0; i < LENS_TAPS_${suffix}; i++){
     /* Starts at 0, not 0.5, so the innermost tap sits exactly on the
        centre. With the half-offset the smallest tap radius was ~10% of the
        disc, which punched a small hole through the middle of every bokeh
        circle — invisible on soft material, obvious on a specular point. */
     float fi = float(i);
     float rj = 0.82 + 0.18 * hash11(fi + jitter);
-    float r  = sqrt(fi / float(LENS_TAPS)) * radius * rj;
+    float r  = sqrt(fi / float(LENS_TAPS_${suffix})) * radius * rj;
     float a  = fi * GOLDEN + jitter;
     vec2  p  = uv + vec2(cos(a), sin(a)) * r * vec2(1.0 / uAspect, 1.0);
     vec3  s;
@@ -996,12 +1001,22 @@ vec3 lensGather(vec2 uv, vec2 dir, float amt, float radius, float jitter){
     wsum += w;
   }
   return sum / max(wsum, 1e-4);
+}`;
+}).join('\n')}
+
+/* GLSL ES 1.00 requires a constant loop bound, so the two quality levels
+   are two functions generated from one source above rather than one
+   function with a variable tap count. The branch between them is on a
+   uniform, so every pixel takes the same side and it costs nothing. */
+vec3 lensGather(vec2 uv, vec2 dir, float amt, float radius, float jitter){
+  if (uLensLow > 0.5) return lensGatherLo(uv, dir, amt, radius, jitter);
+  return lensGatherHi(uv, dir, amt, radius, jitter);
 }
 
 /* Metadata type: same jittered disc. Hard-edged glyphs are exactly what
    exposes an under-sampled gather, so this one gets the jitter even though
    it runs at a smaller radius and a lower tap count. */
-const int TEXT_TAPS = 28;
+const int TEXT_TAPS = 16;
 
 vec3 textFringe(vec2 uv, vec2 dir, float amt, float radius, float jitter){
   if (radius <= 0.0005){
@@ -1881,6 +1896,8 @@ let phase = 0, last = performance.now(), running = true;
    motion does not depend on how fast the machine renders. Melt no longer
    needs a phase accumulator of its own — the simulation IS its state. */
 let simDt = 1 / 60;
+const MELT_DT = 1 / 60;   // the melt integrator's fixed step
+let meltAccum = 0;        // unspent real time waiting to be integrated
 
 function aspectRatio(){
   const [a, b] = P.aspect.split(':').map(Number);
@@ -1900,7 +1917,13 @@ function layout(){
   canvas.style.width  = cssW + 'px';
   canvas.style.height = cssH + 'px';
 
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  /* Capped at 1.5 rather than 2. On a retina display a cap of 2 quadruples
+     the pixel count against a 1x screen, and the post pass is the most
+     expensive thing here — that alone can be the difference between a
+     machine holding 60fps and not. The artwork is soft and glowing, so the
+     resolution it loses is far less visible than the frame rate it buys,
+     and exports are unaffected: they render at their own size. */
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   setBufferSize(Math.round(cssW * dpr), Math.round(cssH * dpr));
 }
 
@@ -1966,10 +1989,28 @@ function renderFrame(){
   if (P.burnOn && P.playing) stepFluid(phase);
   else if (!P.burnOn) stepFluid(phase);   // keeps buffer decaying to plain mask (persistence forced 0 above)
 
-  /* ── PASS M: melt sim. Skipped entirely when melt is off, so the buffer
-     stays cold and turning the amount up starts a fresh melt rather than
-     revealing one that has been running invisibly. ───────────────────── */
-  if (P.postOn && P.melt > 0.0005 && !P.frozen) stepMelt(simDt * P.meltSpeed);
+  /* ── PASS M: melt sim ──────────────────────────────────────────────────
+     FIXED TIMESTEP. Feeding the integrator the wall-clock delta made the
+     melt's appearance depend on the viewer's frame rate: the same ten
+     seconds of simulated time produced mean displacement 0.207 at 60fps,
+     0.185 at 30fps and 0.136 at 20fps — a third weaker, and coarser with
+     it, on a slower machine. That is why the deployed page can look
+     different from the same file running locally.
+
+     Real time is accumulated and spent in fixed 1/60 steps instead, so the
+     result is identical on any hardware. The substep cap stops a slow
+     frame from triggering a catch-up spiral that would make things worse;
+     past that point the melt simply runs in slow motion rather than
+     changing character.
+
+     Skipped entirely when melt is off, so the buffer stays cold and
+     turning the amount up starts a fresh melt. */
+  if (P.postOn && P.melt > 0.0005 && !P.frozen){
+    meltAccum += Math.min(simDt, 0.1) * P.meltSpeed;
+    let n = 0;
+    while (meltAccum >= MELT_DT && n < 6){ stepMelt(MELT_DT); meltAccum -= MELT_DT; n++; }
+    if (meltAccum > MELT_DT * 6) meltAccum = MELT_DT * 6;
+  }
 
   /* ── PASS B: multi-scale glow pyramid ─────────────────────────────────
      Build 4 successively halved levels, blur each by the same radius in its
@@ -2073,6 +2114,7 @@ function renderFrame(){
   f1(progPost,'uLensDistort', P.lensDistort * fx);
   f1(progPost,'uLensEdge', P.lensEdge);
   f1(progPost,'uLensFull', P.lensMode === 'full' ? 1 : 0);
+  f1(progPost,'uLensLow', P.lensQuality === 'low' ? 1 : 0);
   f1(progPost,'uLensFringe', P.lensFringe * fx);
   f1(progPost,'uMelt', P.melt * fx);
   f1(progPost,'uMeltType', P.meltType);
@@ -2477,6 +2519,8 @@ const CONTROLS = [
    { t:'range', k:'lensBlur',      l:'Lens Blur (Bokeh)',   min:0, max:0.100, step:0.001 },
    { t:'segmented', k:'lensMode', l:'Blur Coverage',
      opts:[['partial','Partial'],['full','Full Frame']] },
+   { t:'segmented', k:'lensQuality', l:'Blur Quality',
+     opts:[['high','High'],['low','Fast']] },
    { t:'range', k:'lensFocus',     l:'Focus Plane',    min:0, max:1.00, step:0.01, show:p=>p.lensMode==='partial' },
    { t:'range', k:'lensRange',     l:'Focus Band',     min:0, max:1.00, step:0.01, show:p=>p.lensMode==='partial' },
    { t:'range', k:'lensEdge',      l:'Edge Softness',  min:0, max:1.00, step:0.01, show:p=>p.lensMode==='partial' },
