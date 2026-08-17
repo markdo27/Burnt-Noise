@@ -227,7 +227,7 @@ const P = {
   // ── Content Source ──
   contentType:'text',       // 'text' | 'image' | 'svg'
   title:"don't\nbe\na b*tch",
-  fontSize:0.56,
+  fontSize:1.30,
   assetScale:1.0,
   edgeBlur:20,
   contentColor:'#ff4000',   // the core: what the content resolves to once it saturates
@@ -237,19 +237,19 @@ const P = {
   playing:true,
   interactionMode:'auto',   // 'manual' | 'auto'
   animPreset:'drift',       // sweep | drift | orbit | pulse | boil
-  autoSpeed:10,
+  autoSpeed:15,
   autoDirection:'ttb',      // ttb | btt | ltr | rtl
   autoLoopMode:'wrap',      // wrap | pingpong
   autoEasing:'easein',      // linear | easein | easeout | easeinout
-  brushRadius:0.04,
+  brushRadius:0.13,
   smearIntensity:0.235,
   persistence:0.93,
   fluidWarp:0.188,
   warpScale:4.7,
 
   // ── Optical Effects ──
-  glowPrimary:'#57adff', glowSecondary:'#0f35a5', ground:'#050208',
-  burnColor:'#f24010',      // fire handoff between the cool ramp and the core
+  glowPrimary:'#57beff', glowSecondary:'#0f2da3', ground:'#050208',
+  burnColor:'#f3cd12',      // fire handoff between the cool ramp and the core
   rgbSplitGlow:0.006,
   glowSoftness:16,
   exposure:1.0,
@@ -257,10 +257,10 @@ const P = {
 
   // ── Post Process ──
   postOn:true,
-  grain:0.0, grainSize:2.0, thresh:0.21, contrast:1.31,
-  lensBlur:0.021, lensFocus:0.83, lensRange:0.90, lensHighlight:5.1,
+  grain:0.0, grainSize:2.0, thresh:0.0, contrast:1.57,
+  lensBlur:0.021, lensFocus:0.40, lensRange:0.62, lensHighlight:5.2,
   lensMode:'partial',       // partial = focus plane + edge falloff | full = whole frame
-  lensDistort:-0.31, lensEdge:0.78, lensFringe:0.0,
+  lensDistort:-0.29, lensEdge:0.48, lensFringe:0.0,
   /* MELT AMOUNT IS BOUNDED BY STROKE WIDTH, and that is the whole story of
      why this looked like chrome. The read offset has to stay within a
      fraction of the artwork's line weight: at 0.20 the offset measured
@@ -273,23 +273,23 @@ const P = {
      Around one stroke width the shape deforms and stays whole, which is
      what melting looks like. The range tops out at ten times the default
      rather than the twenty-five it allowed before. */
-  melt:0.03, meltType:0.85, meltSpeed:1.0,
+  melt:0.012, meltType:1.0, meltSpeed:1.7,
   /* Held just above the melt point (0.30). Far above it every column is
      permanently past yield and the field settles into steady flow; close
      to it, columns cross back and forth and the melt keeps re-forming. */
-  meltHeat:0.35,            // heat input rate
+  meltHeat:1.54,            // heat input rate
   /* Hot patches need to be SMALLER than the letterforms. At 2.2 the noise
      ran about two cycles across the whole poster, so heat was effectively
      uniform inside any single glyph and the glyph just translated as a
      rigid body — no visible deformation, which is why the melt looked
      static however fast it was running. */
   meltScale:6.5,            // size of the hot / cold patches
-  meltPoint:0.30,           // heat at which the material yields
-  meltGravity:0.45,
-  meltVisc:1.30,            // viscous drag
-  meltTension:0.020,        // curvature smoothing along the sheet
-  meltFlow:1.20,            // mass transport rate
-  meltSpread:14.0,          // diffusion of the displacement past the shape
+  meltPoint:0.78,           // heat at which the material yields
+  meltGravity:0.73,
+  meltVisc:4.10,            // viscous drag
+  meltTension:0.062,        // curvature smoothing along the sheet
+  meltFlow:2.45,            // mass transport rate
+  meltSpread:35.5,          // diffusion of the displacement past the shape
 
   // ── Poster metadata typography ──
   metaOn:false,
