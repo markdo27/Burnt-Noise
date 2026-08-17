@@ -261,11 +261,19 @@ const P = {
   lensBlur:0.021, lensFocus:0.83, lensRange:0.90, lensHighlight:5.1,
   lensMode:'partial',       // partial = focus plane + edge falloff | full = whole frame
   lensDistort:-0.31, lensEdge:0.78, lensFringe:0.0,
-  /* The leaky integrator settles displacement around 0.14 rather than
-     railing at 1.0, so Melt Amount needs a proportionally wider range to
-     reach the same physical offset. 0.20 here matches what 0.042 produced
-     under the old saturating field. */
-  melt:0.20, meltType:0.85, meltSpeed:1.0,
+  /* MELT AMOUNT IS BOUNDED BY STROKE WIDTH, and that is the whole story of
+     why this looked like chrome. The read offset has to stay within a
+     fraction of the artwork's line weight: at 0.20 the offset measured
+     115px against a median stroke of 12px — nearly TEN stroke widths — so
+     every interior pixel sampled something ten strokes away, the middle of
+     each letter came back as background, and all that survived was a rim
+     where the shift happened to still land on ink. It read as an outline
+     because it WAS an outline: the interior had been sampled away.
+
+     Around one stroke width the shape deforms and stays whole, which is
+     what melting looks like. The range tops out at ten times the default
+     rather than the twenty-five it allowed before. */
+  melt:0.03, meltType:0.85, meltSpeed:1.0,
   /* Held just above the melt point (0.30). Far above it every column is
      permanently past yield and the field settles into steady flow; close
      to it, columns cross back and forth and the melt keeps re-forming. */
@@ -281,6 +289,7 @@ const P = {
   meltVisc:1.30,            // viscous drag
   meltTension:0.020,        // curvature smoothing along the sheet
   meltFlow:1.20,            // mass transport rate
+  meltSpread:14.0,          // diffusion of the displacement past the shape
 
   // ── Poster metadata typography ──
   metaOn:false,
@@ -682,6 +691,7 @@ uniform float uGravity;
 uniform float uViscosity;
 uniform float uTension;
 uniform float uFlow;         // mass transport rate
+uniform float uSpread;       // how far the displacement diffuses past the shape
 uniform float uReset;
 
 ${NOISE}
@@ -812,24 +822,34 @@ void main(){
      closes the loop: heat, yield, run, cool, set, reheat — every stage a
      consequence of the physics rather than a scripted animation. */
 
-  /* ── SURFACE TENSION ───────────────────────────────────────────────────
-     Now in both axes. Smoothing only left-to-right left the field free to
-     step sharply between one row and the next, and it is vertical steps
-     that the read offset turns into hard horizontal seams. */
+  /* ── SURFACE TENSION ───────────────────────────────────────────────── */
   disp += (sL.x + sR.x + sUp.x + sDn.x - 4.0 * disp) * uTension * uDt * 30.0;
 
-  /* ── EDGE FALLOFF ──────────────────────────────────────────────────────
-     THE CHROME-EDGE FIX. This was a hard step(): displacement went from
-     its full value to zero across a single texel at the boundary of the
-     shape. The post pass reads the frame at an offset taken from this
-     field, so a discontinuity here becomes a discontinuity in the image —
-     which is exactly the metallic outline it was drawing around every
-     letter, with the interior merely translated and therefore looking
-     untouched. A smooth falloff means the offset eases to zero instead of
-     dropping off a cliff, so the material deforms rather than being
-     stamped out. */
-  float alive = smoothstep(0.0, 0.06, max(mass, cov));
-  gl_FragColor = vec4(clamp(disp, 0.0, 1.0) * alive, vel * alive, mass, heat);
+  /* ── SPREADING: WHY THE FIELD MUST NOT BE LETTER-SHAPED ────────────────
+     The displacement was masked by coverage, so its boundary coincided
+     exactly with the artwork's own boundary. The post pass offsets the
+     READ coordinate by this field, and an offset shaped like the letter
+     means: inside the letter sample from above, outside sample from here.
+     The letter's edge therefore gets sampled from two different places at
+     once and comes back duplicated — a bright rim tracing every glyph,
+     with the interior merely translated underneath it.
+
+     That rim is inherent to a coverage-shaped field. Softening the mask
+     could not remove it, and neither could smoothing the read, because
+     both leave the boundary where it is; the amplitude just scaled with
+     Melt Amount, which is why zeroing the melt was the only thing that
+     ever made it go away.
+
+     So the field spreads. Displacement diffuses outward past the shape
+     that generated it and the mask is gone entirely — the offset varies
+     gradually across the letter's edge instead of stepping at it, so the
+     glyph deforms rather than being cut out and shifted. Beyond the
+     artwork the offset displaces empty ground, which costs nothing
+     visually because there is nothing there to tear. */
+  float nb = (sL.x + sR.x + sUp.x + sDn.x) * 0.25;
+  disp = mix(disp, nb, clamp(uDt * uSpread, 0.0, 0.5));
+
+  gl_FragColor = vec4(clamp(disp, 0.0, 1.0), vel, mass, heat);
 }`;
 
 /* ═══════ PASS 2 — POST PROCESS ════════════════════════════════════════════ */
@@ -1400,6 +1420,7 @@ function stepMelt(dt){
   f1(progMelt,'uViscosity', P.meltVisc);
   f1(progMelt,'uTension', P.meltTension);
   f1(progMelt,'uFlow', P.meltFlow);
+  f1(progMelt,'uSpread', P.meltSpread);
   f1(progMelt,'uReset', 0);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   meltFront = 1 - meltFront;
@@ -2462,7 +2483,7 @@ const CONTROLS = [
    { t:'range', k:'lensDistort',   l:'Lens Distortion',     min:-0.60, max:0.60, step:0.01 },
    { t:'range', k:'lensFringe',    l:'Lens Fringing (RGB)', min:0, max:3.00,  step:0.01 },
    { t:'range', k:'lensHighlight', l:'Highlight Bloom',     min:0, max:8.00,  step:0.10 },
-   { t:'range', k:'melt',        l:'Melt Amount',      min:0, max:0.500, step:0.005 },
+   { t:'range', k:'melt',        l:'Melt Amount',      min:0, max:0.100, step:0.001 },
    { t:'range', k:'meltSpeed',   l:'Melt Speed',       min:0, max:6.00,  step:0.05 },
    { t:'range', k:'meltHeat',    l:'Heat',             min:0, max:2.00,  step:0.01 },
    { t:'range', k:'meltPoint',   l:'Melt Point',       min:0, max:0.80,  step:0.01 },
@@ -2470,6 +2491,7 @@ const CONTROLS = [
    { t:'range', k:'meltGravity', l:'Gravity',          min:0, max:1.50,  step:0.01 },
    { t:'range', k:'meltVisc',    l:'Viscosity',        min:0.1, max:6.0, step:0.05 },
    { t:'range', k:'meltFlow',    l:'Flow (mass)',      min:0, max:3.00,  step:0.05 },
+   { t:'range', k:'meltSpread',  l:'Spread (softness)', min:0, max:40.0, step:0.5 },
    { t:'range', k:'meltTension', l:'Surface Tension',  min:0, max:0.08,  step:0.001 },
    { t:'range', k:'meltType',    l:'Melt on Metadata', min:0, max:1.00,  step:0.01 },
    { t:'range', k:'grain',     l:'Grain Amount', min:0, max:0.60, step:0.005 },
@@ -2806,7 +2828,7 @@ const ACTIONS = {
     P.lensDistort = rnd(-0.20, 0.35);
     P.lensFringe  = rnd(0.20, 1.30);
     P.lensFocus   = rnd(0.30, 0.75);
-    P.melt        = rnd(0.00, 0.30);
+    P.melt        = rnd(0.00, 0.055);
     P.meltHeat    = rnd(0.30, 1.10);
     P.meltVisc    = rnd(0.60, 2.60);
     buildUI();
