@@ -28,13 +28,21 @@
                  "hot" fire ramp (Exposure/Burn controls the blend), with
                  its own small chromatic split, screen-blended over ground.
        [ TEX ]   Poster type   -> 2D canvas -> texture (tText)
-                 Swiss/Brutalist metadata (kicker, date, subtitle, serial,
-                 edge text, crop marks) — everything except the hero word.
-       [PASS 2]  Scanner FX    -> default framebuffer (screen / export)
-                 Reads rtScene + tText, composites the metadata type, then
-                 degrades the whole frame: head jitter, chromatic
-                 aberration, photocopy threshold, glass streaks, scanlines,
-                 dust, scratches, grain, vignette.
+                 Metadata typography — everything except the hero word.
+                 Flyer layout: kicker/date at the head, a label above a
+                 stacked block of heavy lines, serial at the foot.
+       [PASS 2]  Post process  -> default framebuffer (screen / export)
+                 Reads rtScene + tText. First the optics: lens distortion,
+                 melt and a jittered bokeh gather all warp the coordinate
+                 the frame is READ at, with chromatic fringing folded into
+                 the same taps. Then the metadata type composites, and only
+                 then the emulsion: photocopy threshold, contrast, grain.
+
+                 That order is deliberate. Everything before the composite
+                 is glass and lens, so it bends the image; everything after
+                 sits ON the print, so it runs on the true pixel grid.
+                 Melting the grain along with the image is the tell that
+                 gives a fake away.
 
      EXPORT: the fluid buffer is resolution-local, so a fresh export at a
      new resolution starts from an empty simulation. exportPNG() fast-
@@ -218,43 +226,61 @@ const P = {
 
   // ── Content Source ──
   contentType:'text',       // 'text' | 'image' | 'svg'
-  title:'RADIANT\nBURNT',
-  fontSize:0.88,
+  title:"don't\nbe\na b*tch",
+  fontSize:0.56,
   assetScale:1.0,
-  edgeBlur:2,
+  edgeBlur:20,
+  contentColor:'#ff4000',   // the core: what the content resolves to once it saturates
   customFontHero:null,      // font-family name once a custom font is loaded, else null
 
   // ── Fluid & Interaction ──
   playing:true,
   interactionMode:'auto',   // 'manual' | 'auto'
+  animPreset:'drift',       // sweep | drift | orbit | pulse | boil
   autoSpeed:10,
   autoDirection:'ttb',      // ttb | btt | ltr | rtl
   autoLoopMode:'wrap',      // wrap | pingpong
   autoEasing:'easein',      // linear | easein | easeout | easeinout
-  brushRadius:0.16,
-  smearIntensity:0.14,
+  brushRadius:0.04,
+  smearIntensity:0.235,
   persistence:0.93,
-  fluidWarp:0.05,
-  warpScale:2.5,
+  fluidWarp:0.188,
+  warpScale:4.7,
 
   // ── Optical Effects ──
   glowPrimary:'#57adff', glowSecondary:'#0f35a5', ground:'#050208',
+  burnColor:'#f24010',      // fire handoff between the cool ramp and the core
   rgbSplitGlow:0.006,
   glowSoftness:16,
   exposure:1.0,
 
-  // ── Analog Scanner Artifacts ──
-  scanOn:true,
-  split:0.0, grain:0.16, scanAmt:0.0, scanDens:0.55, streak:0.0,
-  dust:0.0, scratch:0.0, thresh:0.18, contrast:1.12, vig:0.0, jitter:0.0,
+
+  // ── Post Process ──
+  postOn:true,
+  grain:0.0, thresh:0.21, contrast:1.31,
+  lensBlur:0.021, lensFocus:0.83, lensRange:0.90, lensHighlight:5.1,
+  lensDistort:-0.31, lensFringe:0.0,
+  melt:0.042, meltScale:2.2, meltDrip:0.0, meltType:0.85, meltSpeed:1.0,
 
   // ── Poster metadata typography ──
-  subtitle:'A study in thermal gradients, fluid feedback and the quiet violence of a flatbed scanner.',
-  kicker:'BRIK / STUDIO EDITION', date:'16.08.2026', serial:'NO. 0417 / 500', edge:'ANALOG SCANNER ARTIFACTS',
+  metaOn:false,
+  subtitle:'FRANCESCO CASA\nMIKE B\nVALLINOTE DJ TEAM',
+  kicker:'BRIK / STUDIO EDITION', date:'16.08.2026', serial:'NO. 0417 / 500',
+  metaLabel:'LINE UP',
+  metaScale:1.0,            // multiplies every metadata size (all sizes are fractions of W)
+  metaTrack:0.20,           // tracking, in em of the size being drawn
+  metaLead:1.02,            // line-height multiplier for the stacked block
+  metaLabelGap:1.0,         // clearance between the label and the block, in label heights
+  metaWeight:600,           // 300..900
+  metaCase:'upper',         // asis | upper | snake
+  metaMono:false,
   ink:'#f4f2ee', textMode:0, customFontMeta:null,
 
   // ── System ──
-  aspect:'2:3', seed:Math.random()*500, frozen:false, exportH:2400
+  /* Seed is pinned rather than randomised at load so the poster comes up as
+     the tuned composition every time. Randomize Seed still works at runtime
+     — this only fixes the starting point. */
+  aspect:'2:3', seed:445.37439142258927, frozen:false, exportH:2400
 };
 const DEFAULTS = JSON.parse(JSON.stringify(P));
 
@@ -487,12 +513,14 @@ void main(){
 }`;
 
 /* ═══════ PASS C — THERMAL GRADIENT MAP ═════════════════════════════════════
-   core (sharp) + glow (blurred) drive a luminance lookup that blends a
-   user-defined 2-colour "cool" ramp with a built-in "hot" fire ramp — the
-   Exposure (Burn) control decides how much of the hot ramp bleeds into the
-   brightest areas, so the very core always reads as burning regardless of
-   which cool colours are chosen. A small built-in chromatic split is
-   applied to the glow itself (separate from the scanner pass's split).
+   core (sharp) + glow (blurred) drive a luminance lookup through one
+   continuous ramp: black -> Secondary -> Primary -> Burn -> Content. The
+   Exposure (Burn) control decides how much of the frame is pushed up into
+   the hot end. Every stop is user-coloured, including the core — a fixed
+   white core is what turns any large saturated area into a flat white
+   mass, which is exactly what happens once Melt folds the content over
+   itself. A small built-in chromatic split is applied to the glow itself
+   (separate from the post pass's fringing).
    ═══════════════════════════════════════════════════════════════════════ */
 const FRAG_THERMAL = `
 precision highp float;
@@ -501,8 +529,10 @@ varying vec2 vUv;
 uniform sampler2D tFluid;   // Pass A output — pure fluid trail (brush-weighted)
 uniform sampler2D tGlow;    // Pass B output — blurred version of tFluid
 uniform sampler2D tMask;    // raw content mask — always-visible crisp core
-uniform vec3  uGround, uInk;
+uniform vec3  uGround;
 uniform vec3  uPrimary, uSecondary;
+uniform vec3  uContent;     // the core — what the content resolves to when it saturates
+uniform vec3  uBurn;        // fire handoff between the cool ramp and the core
 uniform float uRgbSplit;
 uniform float uExposure;    // Exposure (Burn)
 uniform float uFlat;        // 1.0 = bypass the ramp, show plain flat ink content
@@ -520,9 +550,15 @@ vec3 thermalRamp(float t){
   vec3 c1 = uSecondary;
   vec3 c2 = mix(uSecondary, uPrimary, 0.55);
   vec3 c3 = uPrimary;
-  vec3 c4 = vec3(0.95, 0.25, 0.05);
-  vec3 c5 = vec3(1.00, 0.60, 0.10);
-  vec3 c6 = vec3(1.00, 0.98, 0.85);
+  vec3 c4 = uBurn;
+  /* The stop between the burn and the core is interpolated per channel, not
+     evenly. Those weights are the shape of incandescence: red saturates
+     first, green follows, blue arrives last — which is why a fire ramp
+     reads as heat rather than as a straight fade to the core colour. At the
+     default swatches this reproduces the original hardcoded (1.0,0.6,0.1)
+     stop exactly, so the ramp is unchanged until the user moves a colour. */
+  vec3 c5 = mix(c4, uContent, vec3(1.0, 0.48, 0.055));
+  vec3 c6 = uContent;
   vec3 col = mix(c0, c1, smoothstep(0.0/6.0, 1.0/6.0, t));
   col = mix(col, c2, smoothstep(1.0/6.0, 2.0/6.0, t));
   col = mix(col, c3, smoothstep(2.0/6.0, 3.0/6.0, t));
@@ -551,7 +587,7 @@ vec3 thermalAt(vec2 uv){
 void main(){
   if (uFlat > 0.5){
     float core = texture2D(tMask, vUv).a * contentSweep(vUv, uSweepReveal, uSweepHide, uSweepSoft);
-    gl_FragColor = vec4(mix(uGround, uInk, core), 1.0);
+    gl_FragColor = vec4(mix(uGround, uContent, core), 1.0);
     return;
   }
 
@@ -580,96 +616,204 @@ uniform float uUnit;        // poster-space reference height (resolution indepen
 uniform float uTime;
 uniform float uSeed;
 
-uniform float uSplit;       // chromatic aberration
 uniform float uGrain;
-uniform float uScanAmt;
-uniform float uScanDens;
-uniform float uStreak;
-uniform float uDust;
-uniform float uScratch;
 uniform float uThresh;      // photocopy bleed
 uniform float uContrast;
-uniform float uVig;
-uniform float uJitter;      // scanner head wobble
 uniform float uMode;        // metadata type blend mode 0..3
 uniform vec3  uInk;
 
+uniform float uLens;        // bokeh disc radius (poster fraction)
+uniform float uLensFocus;   // uv.y of the sharp plane
+uniform float uLensRange;   // width of the in-focus band
+uniform float uLensHi;      // highlight weighting for the disc gather
+uniform float uLensDistort; // radial distortion: + barrels, - pincushions
+uniform float uLensFringe;  // lateral chromatic aberration
+uniform float uMelt;        // melt displacement amount
+uniform float uMeltScale;   // melt noise frequency
+uniform float uMeltDrip;    // how much the melt collapses into hanging drips
+uniform float uMeltType;    // how much of the metadata type inherits the melt
+uniform float uMeltTime;    // melt's own clock — runs even while the fluid is paused
+
 ${NOISE}
 
-/* ── DUST ────────────────────────────────────────────────────────────────
-   Grid of cells; each cell may contain one speck at a random offset with a
-   random radius. Static (seed-driven) so it reads as dirt on the glass and
-   not as video noise. Returns 0..1 coverage.                            */
-float dustLayer(vec2 P, float cell, float seed, float density){
-  vec2 g  = P / cell;
-  vec2 id = floor(g), f = fract(g);
-  if (hash21(id + seed) > density) return 0.0;
-  vec2  c = vec2(hash21(id + seed + 1.3), hash21(id + seed + 7.7));
-  float r = 0.06 + 0.26 * hash21(id + seed + 3.1);
-  return smoothstep(r, r * 0.25, length(f - c));
+const float GOLDEN = 2.39996323;   // golden angle — spreads spiral taps evenly
+
+/* Interleaved gradient noise (Jimenez). Used instead of a plain hash to pick
+   each pixel's spiral rotation: a white-noise angle decorrelates neighbours
+   but leaves the leftover error spread evenly across all frequencies, which
+   at a usable tap count shows up as coarse mush. IGN concentrates that error
+   in the high frequencies, where it reads as fine tooth the grain absorbs —
+   the same tap budget, markedly cleaner. */
+float ign(vec2 p){
+  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
-/* ── SCRATCHES ───────────────────────────────────────────────────────────
-   Near-vertical hairlines (the drag direction of a flatbed carriage), each
-   with a slow sinusoidal wobble and a randomised vertical span.         */
-float scratchLayer(vec2 P, vec2 uv, float seed){
-  float s = 0.0;
-  for (int i = 0; i < 5; i++){
-    float fi = float(i);
-    float h0 = hash11(seed + fi * 11.3);
-    float h1 = hash11(seed + fi *  3.7);
-    float h2 = hash11(seed + fi *  5.1);
-    float h3 = hash11(seed + fi *  9.9);
+/* ── MELT ────────────────────────────────────────────────────────────────
+   Domain warp with a deliberate downward bias. A low-frequency fbm is read
+   as a height field and used to sample from ABOVE the current row, so the
+   image sags into the row rather than wobbling around it — sampling
+   symmetrically is what makes most "melt" shaders read as mere distortion.
+   The drip exponent starves the mid-values so the sheet stays mostly intact
+   and only the peaks stretch into long hanging runs, and gravity ramps the
+   whole thing toward the bottom of the frame. vUv.y is 0 at the BOTTOM, so
+   a POSITIVE y offset pulls content downward.                            */
+vec2 meltUV(vec2 p, float amt){
+  if (amt <= 0.0) return p;
+  vec2 q  = vec2(p.x * uAspect, p.y) * uMeltScale;
+  /* The two octaves drift on OPPOSING vectors. Translating one field (what
+     this did before) slides the whole melt across the frame like a moving
+     texture; pulling two against each other makes the peaks form and
+     collapse in place, which is what reads as something actually melting
+     rather than scrolling. */
+  float n  = fbm(q + vec2( uMeltTime * 0.10,  uMeltTime * 0.34) + uSeed);
+  float n2 = fbm(q * 1.9 + vec2(-uMeltTime * 0.21, uMeltTime * -0.13) + vec2(4.3, 1.7) - uSeed);
+  float grav = mix(0.35, 1.0, 1.0 - p.y);
+  float drip = pow(clamp(n, 0.0, 1.0), 1.0 + uMeltDrip * 3.0);
+  p.y += drip * amt * grav;
+  p.x += (n2 - 0.5) * amt * 0.35;
+  return p;
+}
 
-    float xline = h0 * uAspect * uUnit
-                + sin(P.y * 0.011 + h1 * 6.2831) * 22.0;   // wobble
-    float w     = 0.5 + 1.7 * h2;                           // hairline width
+/* ── LENS BLUR (bokeh) ───────────────────────────────────────────────────
+   A disc gather, not a Gaussian. Taps ride a golden-angle spiral with a
+   sqrt radius so they fill the disc at even density, and each tap is
+   weighted by a high power of its own luminance. That weighting is the
+   whole difference between defocus and blur: bright points keep their
+   energy and open into flat discs instead of dissolving into grey mush.
+   The per-channel offsets fold the chromatic aberration into the same
+   taps, so the fringing survives the defocus rather than being averaged
+   away by it.
 
-    // vertical span so scratches don't run edge to edge
-    float y0 = h1 * 0.8;
-    float y1 = y0 + 0.15 + 0.7 * h3;
-    float span = smoothstep(y0, y0 + 0.06, uv.y) * (1.0 - smoothstep(y1 - 0.06, y1, uv.y));
+   THE STACKED-COPIES FIX. A fixed spiral gives every pixel the SAME set
+   of offsets, so a hard edge — lettering above all — reproduces as a
+   handful of aligned, individually sharp ghosts. That is the "layers of
+   text at different blur amounts" look, and no amount of extra taps
+   removes it, because the copies stay in register. Rotating the spiral
+   by a per-pixel random angle decorrelates neighbouring pixels: the same
+   tap budget resolves into fine noise instead of structure, and the
+   existing grain absorbs what is left. Jittering the radius per tap
+   breaks up the concentric ringing the sqrt spacing leaves behind.    */
+const int LENS_TAPS = 48;
 
-    float line = smoothstep(w, 0.0, abs(P.x - xline)) * span;
-    s += line * mix(-1.0, 1.0, step(0.5, h3));              // black or white
+vec3 lensGather(vec2 uv, vec2 dir, float amt, float radius, float jitter){
+  vec3  sum  = vec3(0.0);
+  float wsum = 0.0;
+  for (int i = 0; i < LENS_TAPS; i++){
+    float fi = float(i) + 0.5;
+    float rj = 0.82 + 0.18 * hash11(fi + jitter);
+    float r  = sqrt(fi / float(LENS_TAPS)) * radius * rj;
+    float a  = fi * GOLDEN + jitter;
+    vec2  p  = uv + vec2(cos(a), sin(a)) * r * vec2(1.0 / uAspect, 1.0);
+    vec3  s;
+    s.r = texture2D(tScene, p + dir * amt).r;
+    s.g = texture2D(tScene, p).g;
+    s.b = texture2D(tScene, p - dir * amt).b;
+    float w = 1.0 + pow(clamp(luma(s), 0.0, 1.0), 4.0) * uLensHi;
+    sum  += s * w;
+    wsum += w;
   }
-  return s;
+  return sum / max(wsum, 1e-4);
+}
+
+/* Metadata type: same jittered disc. Hard-edged glyphs are exactly what
+   exposes an under-sampled gather, so this one gets the jitter even though
+   it runs at a smaller radius and a lower tap count. */
+const int TEXT_TAPS = 28;
+
+vec3 textFringe(vec2 uv, vec2 dir, float amt, float radius, float jitter){
+  if (radius <= 0.0005){
+    return vec3(
+      texture2D(tText, uv + dir * amt * 0.65).a,
+      texture2D(tText, uv).a,
+      texture2D(tText, uv - dir * amt * 0.65).a);
+  }
+  vec3 sum = vec3(0.0);
+  for (int i = 0; i < TEXT_TAPS; i++){
+    float fi = float(i) + 0.5;
+    float rj = 0.82 + 0.18 * hash11(fi + jitter + 3.7);
+    float r  = sqrt(fi / float(TEXT_TAPS)) * radius * rj;
+    float a  = fi * GOLDEN + jitter;
+    vec2  p  = uv + vec2(cos(a), sin(a)) * r * vec2(1.0 / uAspect, 1.0);
+    sum += vec3(
+      texture2D(tText, p + dir * amt * 0.65).a,
+      texture2D(tText, p).a,
+      texture2D(tText, p - dir * amt * 0.65).a);
+  }
+  return sum / float(TEXT_TAPS);
+}
+
+/* ── LENS DISTORTION ─────────────────────────────────────────────────────
+   Radial polynomial on the read coordinate: positive k barrels (straight
+   edges bow outward), negative pincushions. The aspect is folded in and
+   back out so the distortion stays circular on a non-square poster rather
+   than stretching with the frame. It pairs with the defocus because they
+   come from the same piece of glass — a lens that bends the field also
+   fails to focus it flat, which is why the blur below picks up a radial
+   term scaled by this amount.                                          */
+vec2 distortUV(vec2 uv, float k){
+  if (abs(k) < 1e-4) return uv;
+  vec2  c  = (uv - 0.5) * vec2(uAspect, 1.0);
+  float r2 = dot(c, c);
+  c *= 1.0 + k * r2;
+  return c / vec2(uAspect, 1.0) + 0.5;
 }
 
 void main(){
   vec2 uv = vUv;
 
-  /* ── 1. SCANNER HEAD JITTER ────────────────────────────────────────────
-     Per-row horizontal displacement. Most rows nudge sub-pixel; a rare few
-     tear noticeably — the classic stepper-motor stutter.               */
-  float row  = floor(uv.y * uUnit / 3.0);
-  float tick = floor(uTime * 9.0);
-  float jw   = hash11(row + tick * 77.0 + uSeed) - 0.5;
-  float tear = step(0.988, hash11(row * 1.7 + tick * 13.0 + uSeed));
-  uv.x += jw * uJitter * (0.0018 + 0.022 * tear);
-  uv.x += sin(uv.y * 42.0 + uTime * 0.6) * uJitter * 0.0007;   // lens wobble
-
-  /* ── 2. CHROMATIC ABERRATION ───────────────────────────────────────────
-     Radial, quadratic with distance from centre: nothing at the middle,
-     visible fringing at the corners — how a real lens/CIS bar behaves.  */
+  /* ── 1. LENS GEOMETRY ──────────────────────────────────────────────────
+     Fringing is radial and quadratic with distance from centre: nothing in
+     the middle, visible at the corners — how a real lens behaves.       */
   vec2  cc  = uv - 0.5;
   float rr  = dot(cc, cc);
   vec2  dir = normalize(cc + 1e-6);
-  float amt = uSplit * (0.0022 + rr * 0.020);
+  float amt = uLensFringe * (0.0022 + rr * 0.020);
+
+  /* ── 2. MELT + LENS DEFOCUS ────────────────────────────────────────────
+     Distortion, melt and defocus are all sampling-side: they warp the READ
+     coordinate and leave the grain downstream on the true pixel grid —
+     grain sits on the glass, not in the image, and melting it too is the
+     tell that gives a fake away.
+
+     The circle of confusion takes the larger of two terms. The focus band
+     is the tilt-shift part (sharp at one height, soft away from it); the
+     field term opens the corners in proportion to the distortion, because
+     glass that bends the field also fails to focus it flat. That coupling
+     is what makes distortion and blur read as one lens instead of two
+     unrelated filters. Neither term fully closes: the 0.10 floor keeps a
+     trace of softness everywhere, which stops the defocus reading as a
+     mask with a hard edge.                                             */
+  vec2 duv = distortUV(uv, uLensDistort);
+  vec2 suv = meltUV(duv, uMelt);
+
+  float dFocus = abs(uv.y - uLensFocus);
+  float band   = smoothstep(uLensRange * 0.5, uLensRange * 0.5 + 0.35, dFocus);
+  float field  = clamp(rr * 4.0, 0.0, 1.0) * clamp(abs(uLensDistort) * 2.5, 0.0, 1.0);
+  float radius = uLens * (0.10 + 0.90 * max(band, field));
+
+  /* One rotation per pixel, shared by both gathers so the artwork and the
+     type defocus in step rather than swimming against each other. Driven
+     off gl_FragCoord so the pattern stays locked to the pixel grid — tying
+     it to uv instead would let it crawl whenever the frame resizes. */
+  float jitter = ign(gl_FragCoord.xy) * 6.2831853;
 
   vec3 col;
-  col.r = texture2D(tScene, uv + dir * amt).r;
-  col.g = texture2D(tScene, uv).g;
-  col.b = texture2D(tScene, uv - dir * amt).b;
+  if (uLens > 0.0005){
+    col = lensGather(suv, dir, amt, radius, jitter);
+  } else {
+    col.r = texture2D(tScene, suv + dir * amt).r;
+    col.g = texture2D(tScene, suv).g;
+    col.b = texture2D(tScene, suv - dir * amt).b;
+  }
 
   /* ── 3. COMPOSITE METADATA TYPOGRAPHY (inside the FX chain) ─────────────
-     Sampling the type's alpha per channel at the split offsets gives the
-     lettering free RGB fringing that matches the artwork exactly.      */
-  vec3 ta = vec3(
-    texture2D(tText, uv + dir * amt * 0.65).a,
-    texture2D(tText, uv).a,
-    texture2D(tText, uv - dir * amt * 0.65).a
-  );
+     Sampling the type's alpha per channel at the fringe offsets gives the
+     lettering RGB edges that match the artwork exactly.
+     The type also takes its own (usually weaker) share of the melt so it
+     drips with the plate while staying readable, and a fraction of the
+     defocus so it sits in the same optical space as the artwork.       */
+  vec2 tuv = meltUV(duv, uMelt * uMeltType);
+  vec3 ta  = textFringe(tuv, dir, amt, radius * 0.45, jitter);
   vec3 ink = uInk;
   vec3 res;
   if      (uMode < 0.5) res = mix(col, ink, ta);                              // normal
@@ -689,38 +833,7 @@ void main(){
   col = mix(col, th, uThresh);
   col = (col - 0.5) * uContrast + 0.5;
 
-  /* ── 5. GLASS STREAKS ──────────────────────────────────────────────────
-     Static per-column bright/dark bands = dirt on the platen.          */
-  float cA = smoothstep(0.984, 1.0, hash11(floor(P.x / 2.0) + uSeed * 31.0));
-  float cB = smoothstep(0.984, 1.0, hash11(floor(P.x / 3.0) + uSeed * 7.0 + 100.0));
-  col += cA * uStreak * 0.32;
-  col -= cB * uStreak * 0.24;
-
-  /* Travelling lamp bar — one soft horizontal band drifting down the frame. */
-  float barPos = fract(uTime * 0.06 + uSeed * 0.37);
-  float bar    = exp(-pow((uv.y - barPos) * 5.5, 2.0));
-  col *= 1.0 + bar * uStreak * 0.30;
-
-  /* Large-scale mottling: uneven illumination / dirty glass. */
-  col *= 1.0 - fbm(P * 0.0035 + uSeed) * 0.16 * uDust;
-
-  /* ── 6. SCANLINES ──────────────────────────────────────────────────────
-     Fine line pair + a broad slow moiré band. */
-  float sl = 0.5 + 0.5 * sin(P.y * uScanDens * 3.14159);
-  col *= 1.0 - uScanAmt * sl;
-  col *= 1.0 - uScanAmt * 0.35 * (0.5 + 0.5 * sin(uv.y * 180.0 + uTime * 1.6));
-
-  /* ── 7. DUST & SCRATCHES ───────────────────────────────────────────────
-     Two dust scales, white specks and black specks, plus hairlines.    */
-  float dW = dustLayer(P, 7.0,  uSeed * 3.1,        uDust * 0.030);
-  float dB = dustLayer(P, 11.0, uSeed * 5.7 + 40.0, uDust * 0.026);
-  float dS = dustLayer(P, 26.0, uSeed * 9.3 + 90.0, uDust * 0.012);
-  col += dW * 0.85;
-  col -= dB * 0.80;
-  col -= dS * 0.55;
-  col += scratchLayer(P, uv, uSeed * 13.0) * uScratch * 0.55;
-
-  /* ── 8. GRAIN ──────────────────────────────────────────────────────────
+  /* ── 5. GRAIN ──────────────────────────────────────────────────────────
      Two decorrelated layers, weighted toward midtones — highlights and
      deep blacks carry less visible grain on real film/scans.          */
   float t24 = floor(uTime * 24.0);
@@ -730,8 +843,7 @@ void main(){
   float mask  = 1.0 - abs(luma(col) - 0.5) * 1.15;
   col += grain * uGrain * clamp(mask, 0.15, 1.0);
 
-  /* ── 9. VIGNETTE + PAPER CAST ──────────────────────────────────────── */
-  col *= clamp(1.0 - uVig * pow(rr * 2.15, 1.4), 0.0, 1.0);
+  /* ── 6. PAPER CAST ─────────────────────────────────────────────────── */
   col  = mix(col, col * vec3(1.03, 0.995, 0.955), 0.65);
 
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -946,13 +1058,18 @@ const scratchCanvas = document.createElement('canvas');
 
 const SANS  = '"Helvetica Neue", Helvetica, Arial, "Segoe UI", sans-serif';
 const HEAVY = '"Helvetica Neue", "Arial Black", Helvetica, Arial, sans-serif';
+const MONO  = '"SF Mono", "Roboto Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace';
 
 let uploadedAsset = null;   // HTMLImageElement for 'image' / 'svg' content types
 
 /** Custom uploaded fonts (Content Source: hero font; Metadata Typography:
     optional separate override). Falls back to the system faces above. */
 function heroFont(){ return P.customFontHero || HEAVY; }
-function metaFont(){ return P.customFontMeta || P.customFontHero || SANS; }
+function metaFont(){
+  if (P.customFontMeta) return P.customFontMeta;
+  if (P.metaMono) return MONO;
+  return P.customFontHero || SANS;
+}
 
 function loadFontFile(file, targetKey){
   const reader = new FileReader();
@@ -1091,8 +1208,93 @@ function drawHeroMask(W, H){
   resetFluid();   // content changed — restart the simulation clean
 }
 
-/** Swiss/Brutalist metadata: kicker, date, top/bottom rules, serial, tick
-    index, rotated edge text, subtitle, crop + registration marks. */
+/* ── metadata typography: shared treatment ───────────────────────────────
+   Every preset below draws different furniture but sets type through these
+   four helpers, so the Scale / Tracking / Leading / Weight / Case controls
+   behave identically whichever layout is active. All sizes are fractions
+   of W, so a 4200px export is the same poster as the 1400px preview.   */
+
+/** Case treatment. snake_case is the file-stamp idiom from the reference:
+    lowercase with the spaces welded shut, which is what makes a tiny tag
+    read as a machine stamp rather than as a caption. */
+function metaText(s){
+  const t = String(s == null ? '' : s);
+  if (P.metaCase === 'upper') return t.toUpperCase();
+  if (P.metaCase === 'snake') return t.toLowerCase().replace(/\s+/g, '_');
+  return t;
+}
+
+function metaPx(W, frac){ return Math.max(1, Math.round(frac * W * P.metaScale)); }
+
+function metaMetrics(W){
+  const M = 0.085 * W;
+  return { M, small: metaPx(W, 0.0145) };
+}
+
+/** The stacked block honours explicit line breaks when the user supplies
+    them and falls back to wrapping, so one long subtitle still stacks. */
+function blockLines(c, px, maxW, weight){
+  const raw = P.subtitle.trim();
+  if (!raw) return [];
+  c.font = `${weight} ${px}px ${metaFont()}`;
+  const explicit = raw.split('\n').map(s => s.trim()).filter(Boolean);
+  if (explicit.length > 1) return explicit.slice(0, 6);
+  return wrap(c, raw, maxW).slice(0, 6);
+}
+
+/** Rave flyer: a tiny label sitting above a stacked block of heavy lines
+    with the leading pulled almost down to the cap height. Everything hangs
+    off one left edge and there are no rules — the density of the block IS
+    the structure, which is why adding a grid to this layout kills it.
+    Tracking goes negative against the shared control for the same reason:
+    display sizes need to close up, not open out.
+
+    THE LABEL GAP. Offsetting the label by a fraction of the block's line
+    height collides with it, because a line's ink rises above its baseline
+    by roughly three quarters of its size — so a 0.62-line offset puts the
+    label inside the first row's ascenders whenever the type is heavy or
+    the leading is tight. Measuring the actual ascent of the first line and
+    clearing THAT is the only offset that holds across weights, scales and
+    custom fonts. actualBoundingBoxAscent is reported by every current
+    engine; the 0.72em fallback covers the case where it comes back zero. */
+function drawMetaFlyer(c, W, H){
+  const { M, small } = metaMetrics(W);
+  const heavy = Math.max(P.metaWeight, 700);
+
+  c.font = `${P.metaWeight} ${small}px ${metaFont()}`;
+  tracked(c, metaText(P.kicker), M,     M + small, small * P.metaTrack, 'left');
+  tracked(c, metaText(P.date),   W - M, M + small, small * P.metaTrack, 'right');
+
+  const linePx = metaPx(W, 0.042);
+  const lead   = linePx * Math.min(P.metaLead, 1.06);
+  const lines  = blockLines(c, linePx, W - M * 2, heavy);
+  const base   = H - M - 0.055 * W;
+  const top    = base - (lines.length - 1) * lead;
+
+  const tight = linePx * Math.max(-0.06, P.metaTrack - 0.18);
+  c.font = `${heavy} ${linePx}px ${metaFont()}`;
+
+  if (lines.length && P.metaLabel.trim()){
+    const m = c.measureText(lines[0]);
+    const ascent = m.actualBoundingBoxAscent || linePx * 0.72;
+    const labelPx = metaPx(W, 0.0125);
+    c.font = `${P.metaWeight} ${labelPx}px ${metaFont()}`;
+    c.globalAlpha = 0.8;
+    tracked(c, metaText(P.metaLabel), M,
+            top - ascent - labelPx * P.metaLabelGap,
+            labelPx * (P.metaTrack + 0.18), 'left');
+    c.globalAlpha = 1;
+    c.font = `${heavy} ${linePx}px ${metaFont()}`;
+  }
+
+  lines.forEach((ln, i) => tracked(c, metaText(ln), M, top + i * lead, tight, 'left'));
+
+  const sp = metaPx(W, 0.0115);
+  c.font = `${P.metaWeight} ${sp}px ${metaFont()}`;
+  tracked(c, metaText(P.serial), M, H - M, sp * P.metaTrack, 'left');
+}
+
+/** Metadata typography → tText: everything except the hero word. */
 function drawPoster(W, H){
   textCanvas.width = W; textCanvas.height = H;
   const c = tctx;
@@ -1100,53 +1302,7 @@ function drawPoster(W, H){
   c.fillStyle = '#fff'; c.strokeStyle = '#fff';
   c.textBaseline = 'alphabetic';
 
-  const M    = 0.085 * W;               // margin
-  const hair = Math.max(1, 0.0016 * W); // hairline rule weight
-  const cw   = W - M * 2;               // content width
-
-  /* ── top band: kicker / date + rule ────────────────────────────────── */
-  const smallPx  = Math.round(0.0145 * W);
-  const topBase  = M + smallPx;
-  const topRuleY = M + 0.040 * W;
-
-  c.font = `600 ${smallPx}px ${metaFont()}`;
-  tracked(c, P.kicker, M,     topBase, smallPx * 0.20, 'left');
-  tracked(c, P.date,   W - M, topBase, smallPx * 0.20, 'right');
-
-  c.lineWidth = hair * 2;
-  c.beginPath(); c.moveTo(M, topRuleY); c.lineTo(W - M, topRuleY); c.stroke();
-
-  /* ── bottom band: serial + rule ─────────────────────────────────────── */
-  const botRuleY = H - M - 0.048 * W;
-  const botBase  = H - M;
-
-  c.lineWidth = hair * 2;
-  c.beginPath(); c.moveTo(M, botRuleY); c.lineTo(W - M, botRuleY); c.stroke();
-
-  c.font = `600 ${smallPx}px ${metaFont()}`;
-  tracked(c, P.serial, M,     botBase, smallPx * 0.20, 'left');
-  tracked(c, '↓ ' + P.aspect, W - M, botBase, smallPx * 0.20, 'right');
-
-  if (P.edge.trim()){
-    const ep = Math.round(0.0115 * W);
-    c.save();
-    c.translate(W - M * 0.44, botRuleY - 0.02 * W);
-    c.rotate(-Math.PI / 2);
-    c.font = `500 ${ep}px ${metaFont()}`;
-    c.globalAlpha = 0.85;
-    tracked(c, P.edge, 0, 0, ep * 0.30, 'left');
-    c.restore();
-    c.globalAlpha = 1;
-  }
-
-  const subPx  = Math.round(0.0225 * W);
-  const subLead = subPx * 1.32;
-  c.font = `400 ${subPx}px ${metaFont()}`;
-  const subLines = P.subtitle.trim() ? wrap(c, P.subtitle, cw * 0.62).slice(0, 4) : [];
-  const subTop   = botRuleY - 0.05 * W - subLines.length * subLead;
-  subLines.forEach((ln, i) => {
-    tracked(c, ln, M, subTop + (i + 1) * subLead, subPx * 0.012, 'left');
-  });
+  if (P.metaOn) drawMetaFlyer(c, W, H);
 
   gl.bindTexture(gl.TEXTURE_2D, textTex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -1158,6 +1314,19 @@ function drawPoster(W, H){
    5. BRUSH / AUTO-SWEEP
    ═══════════════════════════════════════════════════════════════════════ */
 const DRAG_VECS = { ttb:[0,-1], btt:[0,1], ltr:[1,0], rtl:[-1,0] };
+
+/** Auto-mode motion characters. Each one is a different answer to "where is
+    the brush and how much is revealed"; see computeAnim for the bodies.
+    DIRECTIONAL marks the presets that actually consult Auto Direction, so
+    the control panel can hide that select for the ones that ignore it. */
+const ANIM_PRESETS = {
+  sweep: 'Sweep — wipe in, hold, wipe away',
+  drift: 'Drift — travel continuously, never erase',
+  orbit: 'Orbit — brush circles the frame',
+  pulse: 'Pulse — breathe in and out in place',
+  boil:  'Boil — churn in place, no travel',
+};
+const DIRECTIONAL = new Set(['sweep', 'drift']);
 
 function ease(t, mode){
   t = Math.min(1, Math.max(0, t));
@@ -1238,6 +1407,52 @@ function computeAnim(t){
     : (t / period) % 1;
   const u = ease(raw, P.autoEasing);
 
+  const preset = ANIM_PRESETS[P.animPreset] ? P.animPreset : 'sweep';
+
+  /* Every preset is a choice of two things only: where the brush is this
+     frame, and how much of the content the sweep is currently showing.
+     Everything else (turbulence, persistence, smear) is already in the
+     fluid pass, so a preset never needs to touch the simulation itself. */
+  if (preset === 'orbit'){
+    const a = raw * Math.PI * 2;
+    return {
+      brush: { x: 0.5 + Math.cos(a) * 0.28, y: 0.5 + Math.sin(a) * 0.28 },
+      dragDir: { x: -Math.sin(a), y: Math.cos(a) },   // tangent to the circle
+      sweep: SWEEP_FULL, axis: ax
+    };
+  }
+
+  if (preset === 'boil'){
+    /* Brush parked, content permanently present: the turbulence and
+       persistence do all the work, so the shape churns without going
+       anywhere. Pairs with a high Fluid Warp. */
+    return { brush:{x:0.5,y:0.55}, dragDir:{x:0,y:0.12}, sweep: SWEEP_FULL, axis: ax };
+  }
+
+  if (preset === 'drift'){
+    /* Continuous travel with no erase phase — the trail keeps getting
+       pushed the same way and never washes off, so it accumulates instead
+       of cycling. Uses raw rather than eased progress so the wrap point
+       does not visibly stutter. */
+    let bx = 0.5, by = 0.62;
+    if      (dirKey === 'ttb') by = 1 - raw;
+    else if (dirKey === 'btt') by = raw;
+    else if (dirKey === 'ltr') bx = raw;
+    else if (dirKey === 'rtl') bx = 1 - raw;
+    return { brush:{x:bx,y:by}, dragDir:{x:d[0],y:d[1]}, sweep: SWEEP_FULL, axis: ax };
+  }
+
+  if (preset === 'pulse'){
+    /* Breathe in place: the reveal edge rises across the first half of the
+       cycle and retreats across the second, with the brush parked. */
+    const b = raw < 0.5 ? raw / 0.5 : 1 - (raw - 0.5) / 0.5;
+    return {
+      brush:{x:0.5,y:0.55}, dragDir:{x:0,y:0.12},
+      sweep: { reveal: ease(b, P.autoEasing), hide: 0 }, axis: ax
+    };
+  }
+
+  // ── sweep (default): the original directional wipe ──
   let bx = 0.5, by = 0.62;
   if      (dirKey === 'ttb') by = 1 - u;
   else if (dirKey === 'btt') by = u;
@@ -1271,6 +1486,11 @@ function sweepSoftness(){ return Math.min(0.5, Math.max(0.03, P.brushRadius * 0.
 const POSTER_UNIT = 1400;
 let bufW = 0, bufH = 0;
 let phase = 0, last = performance.now(), running = true;
+/* Melt keeps its own clock. Driving it off `phase` tied its speed to the
+   content cycle and stopped it dead whenever the fluid was paused; the melt
+   is a property of the material, not of the reveal animation, so it runs
+   whenever the frame is live and only Freeze stops it. */
+let meltPhase = 0;
 
 function aspectRatio(){
   const [a, b] = P.aspect.split(':').map(Number);
@@ -1418,7 +1638,8 @@ function renderFrame(){
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glowTex);  i1(progThermal,'tGlow',1);
   gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex);  i1(progThermal,'tMask',2);
   f3(progThermal,'uGround', hex3(P.ground));
-  f3(progThermal,'uInk', hex3(P.ink));
+  f3(progThermal,'uContent', hex3(P.contentColor));
+  f3(progThermal,'uBurn', hex3(P.burnColor));
   f3(progThermal,'uPrimary', hex3(P.glowPrimary));
   f3(progThermal,'uSecondary', hex3(P.glowSecondary));
   f1(progThermal,'uRgbSplit', P.rgbSplitGlow);
@@ -1432,7 +1653,7 @@ function renderFrame(){
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   /* ── PASS 2: scanner artifacts → screen ──────────────────────────────── */
-  const fx = P.scanOn ? 1 : 0;
+  const fx = P.postOn ? 1 : 0;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, bufW, bufH);
   gl.useProgram(progPost);
@@ -1442,26 +1663,29 @@ function renderFrame(){
   f1(progPost,'uUnit', POSTER_UNIT);
   f1(progPost,'uTime', phase);
   f1(progPost,'uSeed', P.seed);
-  f1(progPost,'uSplit', P.split * fx);
   f1(progPost,'uGrain', P.grain * fx);
-  f1(progPost,'uScanAmt', P.scanAmt * fx);
-  f1(progPost,'uScanDens', P.scanDens);
-  f1(progPost,'uStreak', P.streak * fx);
-  f1(progPost,'uDust', P.dust * fx);
-  f1(progPost,'uScratch', P.scratch * fx);
   f1(progPost,'uThresh', P.thresh * fx);
-  f1(progPost,'uContrast', P.scanOn ? P.contrast : 1.0);
-  f1(progPost,'uVig', P.vig * fx);
-  f1(progPost,'uJitter', P.jitter * fx);
+  f1(progPost,'uContrast', P.postOn ? P.contrast : 1.0);
   f1(progPost,'uMode', P.textMode);
   f3(progPost,'uInk', hex3(P.ink));
+  f1(progPost,'uLens', P.lensBlur * fx);
+  f1(progPost,'uLensFocus', P.lensFocus);
+  f1(progPost,'uLensRange', P.lensRange);
+  f1(progPost,'uLensHi', P.lensHighlight);
+  f1(progPost,'uLensDistort', P.lensDistort * fx);
+  f1(progPost,'uLensFringe', P.lensFringe * fx);
+  f1(progPost,'uMelt', P.melt * fx);
+  f1(progPost,'uMeltScale', P.meltScale);
+  f1(progPost,'uMeltDrip', P.meltDrip);
+  f1(progPost,'uMeltType', P.meltType);
+  f1(progPost,'uMeltTime', meltPhase);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
 function loop(now){
   const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
-  if (!P.frozen) phase += dt;
+  if (!P.frozen){ phase += dt; meltPhase += dt * P.meltSpeed; }
   if (running) renderFrame();
   requestAnimationFrame(loop);
 }
@@ -1531,13 +1755,17 @@ const CONTROLS = [
    { t:'file', k:'svgAsset', l:'SVG Logo', accept:'.svg,image/svg+xml', show:p=>p.contentType==='svg' },
    { t:'range', k:'assetScale', l:'Asset Scale', min:0.2, max:2.0, step:0.01, show:p=>p.contentType!=='text' },
    { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
+   { t:'colors', keys:[['contentColor','Content Color (text / logo core)']] },
    { t:'font', k:'customFontHero', l:'Custom Font', accept:'.ttf,.otf,.woff,.woff2' },
  ]},
  { title:'Fluid & Interaction', items:[
    { t:'segmented', k:'playing', l:'Animation', opts:[[true,'Pause'],[false,'Play']], invert:true },
    { t:'segmented', k:'interactionMode', opts:[['manual','Manual'],['auto','Auto']] },
+   { t:'select', k:'animPreset', l:'Animation Preset', show:p=>p.interactionMode==='auto',
+     opts:Object.entries(ANIM_PRESETS) },
    { t:'range', k:'autoSpeed', l:'Auto Speed', min:1, max:30, step:0.5, show:p=>p.interactionMode==='auto' },
-   { t:'select', k:'autoDirection', l:'Auto Direction', show:p=>p.interactionMode==='auto',
+   { t:'select', k:'autoDirection', l:'Auto Direction',
+     show:p=>p.interactionMode==='auto' && DIRECTIONAL.has(p.animPreset),
      opts:[['ttb','Top to Bottom'],['btt','Bottom to Top'],['ltr','Left to Right'],['rtl','Right to Left']] },
    { t:'segmented', k:'autoLoopMode', l:'Auto Loop Mode', opts:[['wrap','Wrap'],['pingpong','Ping-Pong']], show:p=>p.interactionMode==='auto' },
    { t:'select', k:'autoEasing', l:'Auto Easing', show:p=>p.interactionMode==='auto',
@@ -1549,31 +1777,44 @@ const CONTROLS = [
    { t:'range', k:'warpScale', l:'Warp Scale', min:0.5, max:8.0, step:0.1 },
  ]},
  { title:'Optical Effects', items:[
-   { t:'colors', keys:[['glowPrimary','Primary Glow Color'],['glowSecondary','Secondary Glow Color'],['ground','Ground / Paper']] },
+   { t:'colors', keys:[['glowPrimary','Primary Glow Color'],['glowSecondary','Secondary Glow Color'],['burnColor','Burn Color (hot edge)'],['ground','Ground / Paper']] },
    { t:'range', k:'rgbSplitGlow', l:'RGB Split (Aberration)', min:0, max:0.025, step:0.0005 },
    { t:'range', k:'glowSoftness', l:'Glow Softness', min:0, max:60, step:0.5 },
    { t:'range', k:'exposure', l:'Exposure (Burn)', min:0.0, max:2.5, step:0.01 },
  ]},
- { title:'Scanner Artifacts', items:[
-   { t:'toggle', k:'scanOn', l:'Enable Scanner Artifacts', big:true },
-   { t:'range', k:'grain',    l:'Grain Amount',        min:0, max:0.60, step:0.005 },
-   { t:'range', k:'split',    l:'RGB Split',           min:0, max:3.00, step:0.01 },
-   { t:'range', k:'scanAmt',  l:'Scanline Opacity',    min:0, max:0.70, step:0.005 },
-   { t:'range', k:'scanDens', l:'Scanline Density',    min:0.05, max:3.00, step:0.01 },
-   { t:'range', k:'dust',     l:'Dust Density',        min:0, max:2.00, step:0.01 },
-   { t:'range', k:'scratch',  l:'Scratches',           min:0, max:1.50, step:0.01 },
-   { t:'range', k:'streak',   l:'Streaks / Lamp Bar',  min:0, max:1.20, step:0.01 },
-   { t:'range', k:'thresh',   l:'Photocopy Bleed',     min:0, max:1.00, step:0.01 },
-   { t:'range', k:'contrast', l:'Contrast',            min:0.50, max:2.20, step:0.01 },
-   { t:'range', k:'vig',      l:'Vignette',            min:0, max:1.20, step:0.01 },
-   { t:'range', k:'jitter',   l:'Scan Jitter',         min:0, max:2.00, step:0.01 },
+ { title:'Post Process', items:[
+   { t:'toggle', k:'postOn', l:'Enable Post Process', big:true },
+   { t:'range', k:'lensBlur',      l:'Lens Blur (Bokeh)',   min:0, max:0.100, step:0.001 },
+   { t:'range', k:'lensDistort',   l:'Lens Distortion',     min:-0.60, max:0.60, step:0.01 },
+   { t:'range', k:'lensFringe',    l:'Lens Fringing (RGB)', min:0, max:3.00,  step:0.01 },
+   { t:'range', k:'lensFocus',     l:'Focus Plane',         min:0, max:1.00,  step:0.01 },
+   { t:'range', k:'lensRange',     l:'Focus Band',          min:0, max:1.00,  step:0.01 },
+   { t:'range', k:'lensHighlight', l:'Highlight Bloom',     min:0, max:8.00,  step:0.10 },
+   { t:'range', k:'melt',          l:'Melt Amount',         min:0, max:0.120, step:0.001 },
+   { t:'range', k:'meltSpeed',     l:'Melt Speed',          min:0, max:6.00,  step:0.05 },
+   { t:'range', k:'meltScale',     l:'Melt Scale',          min:0.5, max:8.0, step:0.10 },
+   { t:'range', k:'meltDrip',      l:'Drip Bias',           min:0, max:1.00,  step:0.01 },
+   { t:'range', k:'meltType',      l:'Melt on Metadata',    min:0, max:1.00,  step:0.01 },
+   { t:'range', k:'grain',    l:'Grain Amount',    min:0, max:0.60, step:0.005 },
+   { t:'range', k:'thresh',   l:'Photocopy Bleed', min:0, max:1.00, step:0.01 },
+   { t:'range', k:'contrast', l:'Contrast',        min:0.50, max:2.20, step:0.01 },
  ]},
  { title:'Metadata Typography', items:[
-   { t:'text', k:'subtitle', l:'Subtitle' },
-   { t:'text', k:'kicker',   l:'Kicker' },
-   { t:'text', k:'date',     l:'Date' },
-   { t:'text', k:'serial',   l:'Serial Number' },
-   { t:'text', k:'edge',     l:'Edge Text' },
+   { t:'toggle', k:'metaOn', l:'Enable Metadata Type', big:true },
+   { t:'textarea', k:'subtitle', l:'Stacked Block (one name per line)' },
+   { t:'text', k:'metaLabel', l:'Block Label' },
+   { t:'text', k:'kicker',    l:'Kicker (top left)' },
+   { t:'text', k:'date',      l:'Date (top right)' },
+   { t:'text', k:'serial',    l:'Serial (foot)' },
+   { t:'range', k:'metaScale',    l:'Type Scale',  min:0.50, max:2.50, step:0.01 },
+   { t:'range', k:'metaTrack',    l:'Tracking',    min:0.00, max:0.60, step:0.005 },
+   { t:'range', k:'metaLead',     l:'Leading',     min:0.80, max:1.60, step:0.01 },
+   { t:'range', k:'metaLabelGap', l:'Label Gap',   min:0.00, max:4.00, step:0.05 },
+   { t:'select', k:'metaWeight', l:'Weight', num:true,
+     opts:[['300','Light'],['400','Regular'],['500','Medium'],['600','Semibold'],['700','Bold'],['800','Extrabold'],['900','Black']] },
+   { t:'segmented', k:'metaCase', l:'Case',
+     opts:[['asis','As Is'],['upper','UPPER'],['snake','snake_case']] },
+   { t:'toggle', k:'metaMono', l:'Monospace' },
    { t:'colors', keys:[['ink','Ink Color']] },
    { t:'select', k:'textMode', l:'Metadata Blend Mode', num:true,
      opts:[['0','Normal'],['1','Multiply'],['2','Screen'],['3','Difference']] },
@@ -1601,7 +1842,11 @@ function fmt(v, spec){
 }
 
 const HERO_KEYS = new Set(['title','fontSize','aspect','contentType','assetScale','edgeBlur']);
-const TYPO_KEYS = new Set(['subtitle','kicker','date','serial','edge','aspect']);
+const TYPO_KEYS = new Set([
+  'subtitle','kicker','date','serial','aspect','metaLabel','metaOn',
+  'metaScale','metaTrack','metaLead','metaLabelGap','metaWeight','metaCase',
+  'metaMono',
+]);
 function touched(key){
   if (key === 'aspect') layout();
   if (HERO_KEYS.has(key)) drawHeroMask(bufW, bufH);
@@ -1856,17 +2101,21 @@ const ACTIONS = {
     P.persistence     = rnd(0.80, 0.97);
     P.fluidWarp       = rnd(0.0, 0.18);
     P.warpScale       = rnd(1, 6);
+    P.animPreset      = Object.keys(ANIM_PRESETS)[Math.floor(rnd(0, Object.keys(ANIM_PRESETS).length))];
     P.autoDirection   = ['ttb','btt','ltr','rtl'][Math.floor(rnd(0,4))];
     P.autoEasing      = ['linear','easein','easeout','easeinout'][Math.floor(rnd(0,4))];
     P.glowPrimary     = '#'+Math.floor(rnd(0,0xffffff)).toString(16).padStart(6,'0');
     P.glowSecondary   = '#'+Math.floor(rnd(0,0xffffff)).toString(16).padStart(6,'0');
     P.exposure        = rnd(0.6, 1.8);
     P.rgbSplitGlow    = rnd(0.0, 0.015);
-    P.split       = rnd(0.20, 1.30);
     P.grain       = rnd(0.08, 0.28);
-    P.dust        = rnd(0.15, 0.90);
-    P.scratch     = rnd(0.10, 0.80);
     P.thresh      = rnd(0.00, 0.42);
+    P.lensBlur    = rnd(0.00, 0.045);
+    P.lensDistort = rnd(-0.20, 0.35);
+    P.lensFringe  = rnd(0.20, 1.30);
+    P.lensFocus   = rnd(0.30, 0.75);
+    P.melt        = rnd(0.00, 0.055);
+    P.meltDrip    = rnd(0.20, 0.85);
     buildUI();
   },
   reset(){
