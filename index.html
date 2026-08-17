@@ -257,7 +257,7 @@ const P = {
 
   // ── Post Process ──
   postOn:true,
-  grain:0.0, thresh:0.21, contrast:1.31,
+  grain:0.0, grainSize:2.0, thresh:0.21, contrast:1.31,
   lensBlur:0.021, lensFocus:0.83, lensRange:0.90, lensHighlight:5.1,
   lensDistort:-0.31, lensFringe:0.0,
   melt:0.042, meltScale:2.2, meltDrip:0.0, meltType:0.85, meltSpeed:1.0,
@@ -280,7 +280,8 @@ const P = {
   /* Seed is pinned rather than randomised at load so the poster comes up as
      the tuned composition every time. Randomize Seed still works at runtime
      — this only fixes the starting point. */
-  aspect:'2:3', seed:445.37439142258927, frozen:false, exportH:2400
+  aspect:'2:3', seed:445.37439142258927, frozen:false, exportH:2400,
+  gifWidth:420, gifFps:12, gifSeconds:3.0
 };
 const DEFAULTS = JSON.parse(JSON.stringify(P));
 
@@ -617,6 +618,7 @@ uniform float uTime;
 uniform float uSeed;
 
 uniform float uGrain;
+uniform float uGrainSize;   // crystal size, in poster units
 uniform float uThresh;      // photocopy bleed
 uniform float uContrast;
 uniform float uMode;        // metadata type blend mode 0..3
@@ -758,6 +760,38 @@ vec2 distortUV(vec2 uv, float k){
   return c / vec2(uAspect, 1.0) + 0.5;
 }
 
+/* ── FILM GRAIN ──────────────────────────────────────────────────────────
+   Silver-halide crystals, not sensor noise. Three properties separate the
+   two, and per-pixel white noise — which is what this used to be — has
+   none of them:
+
+     SIZE     Crystals are a physical size on the negative, so grain has to
+              be sampled through an INTERPOLATED noise at a chosen scale.
+              Hashing per pixel pins the grain to the output resolution and
+              reads as TV static or a dirty sensor, never as film.
+     CLUMPING Crystals gather in patches instead of spreading evenly, so a
+              coarse layer modulates the amplitude of the fine one. Without
+              this the field is statistically flat and looks synthetic even
+              at the right size.
+     DENSITY  Visibility tracks exposure: it peaks in the midtones and
+              falls away at both ends. Blown highlights are clear base with
+              no crystals left to see, which is why grain that stays even
+              across the tonal range gives itself away immediately.
+
+   The three channels are sampled at decorrelated offsets, because a colour
+   emulsion carries three independent layers — then pulled most of the way
+   back toward luminance, because fully independent RGB reads as chroma
+   noise rather than grain. */
+vec3 filmGrain(vec2 Pp, float size, float jump){
+  vec2 q = Pp / max(size, 0.4) + jump;
+  vec3 g = vec3(vnoise(q),
+                vnoise(q + vec2(17.3,  5.1)),
+                vnoise(q + vec2( 3.7, 29.4)));
+  float clump = vnoise(q * 0.34 + vec2(11.0, 4.0));
+  g = (g - 0.5) * mix(0.55, 1.55, clump);
+  return mix(vec3(dot(g, vec3(0.3333))), g, 0.35);
+}
+
 void main(){
   vec2 uv = vUv;
 
@@ -833,15 +867,16 @@ void main(){
   col = mix(col, th, uThresh);
   col = (col - 0.5) * uContrast + 0.5;
 
-  /* ── 5. GRAIN ──────────────────────────────────────────────────────────
-     Two decorrelated layers, weighted toward midtones — highlights and
-     deep blacks carry less visible grain on real film/scans.          */
-  float t24 = floor(uTime * 24.0);
-  float g1 = hash21(P * 1.30 + t24 * vec2(13.7, 7.3) + uSeed);
-  float g2 = hash21(P * 0.61 - t24 * vec2( 3.1, 9.7) + uSeed);
-  float grain = (g1 * 0.65 + g2 * 0.35) - 0.5;
-  float mask  = 1.0 - abs(luma(col) - 0.5) * 1.15;
-  col += grain * uGrain * clamp(mask, 0.15, 1.0);
+  /* ── 5. FILM GRAIN ─────────────────────────────────────────────────────
+     A whole fresh field every 24th of a second — a film gate, not a smooth
+     drift. Grain that slides between frames reads as a moving texture laid
+     over the picture; real grain has no correlation frame to frame, so the
+     field jumps somewhere else entirely each tick.                     */
+  float t24  = floor(uTime * 24.0);
+  float jump = hash11(t24 + uSeed) * 256.0;
+  vec3  gr   = filmGrain(P, uGrainSize, jump);
+  float dens = pow(1.0 - abs(luma(col) * 2.0 - 1.0), 1.35);
+  col += gr * uGrain * 2.2 * mix(0.10, 1.0, dens);
 
   /* ── 6. PAPER CAST ─────────────────────────────────────────────────── */
   col  = mix(col, col * vec3(1.03, 0.995, 0.955), 0.65);
@@ -1528,9 +1563,10 @@ function setBufferSize(w, h){
 }
 
 function updateHud(){
+  const pct = busy.startsWith('gif') ? ` · GIF ${busy.split(':')[1] || 0}%` : '';
   document.getElementById('hudTxt').textContent =
     `${P.aspect} · ${bufW}×${bufH} · SIM ${simW}×${simH} · ` +
-    `${IS_GL2 ? 'GL2' : 'GL1'}/${HDR_OK ? 'F16' : 'U8'} · SEED ${P.seed.toFixed(1)}`;
+    `${IS_GL2 ? 'GL2' : 'GL1'}/${HDR_OK ? 'F16' : 'U8'} · SEED ${P.seed.toFixed(1)}${pct}`;
 }
 
 /** One fluid-sim step. Callable both from the live render loop and from
@@ -1664,6 +1700,7 @@ function renderFrame(){
   f1(progPost,'uTime', phase);
   f1(progPost,'uSeed', P.seed);
   f1(progPost,'uGrain', P.grain * fx);
+  f1(progPost,'uGrainSize', P.grainSize);
   f1(progPost,'uThresh', P.thresh * fx);
   f1(progPost,'uContrast', P.postOn ? P.contrast : 1.0);
   f1(progPost,'uMode', P.textMode);
@@ -1741,6 +1778,296 @@ function exportPNG(){
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   7b. GIF ENCODER — GIF89a, written out by hand
+   The project ships as one file with no dependencies, so pulling in a GIF
+   library is not on the table. This is the whole format: a median-cut
+   palette shared by every frame, nearest-colour mapping through a 15-bit
+   cache, GIF's variable-width LZW, and the byte layout around it.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Median cut. Repeatedly split the box with the longest colour axis at its
+    median along that axis. Cheap, deterministic, and good enough for
+    posters — where the palette is dominated by one ramp rather than by the
+    scattered colours a photograph would need. */
+function buildPalette(samples, maxColors){
+  const count = samples.length / 3;
+  const mkBox = ids => {
+    let lo = [255,255,255], hi = [0,0,0], sum = [0,0,0];
+    for (const i of ids){
+      for (let c = 0; c < 3; c++){
+        const v = samples[i*3+c];
+        if (v < lo[c]) lo[c] = v;
+        if (v > hi[c]) hi[c] = v;
+        sum[c] += v;
+      }
+    }
+    const ext = [hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]];
+    /* Longest axis is weighted by luma response: a given spread in green is
+       far more visible than the same spread in blue, so splitting on raw
+       extent wastes palette entries on differences nobody sees. */
+    const w = [ext[0]*0.299, ext[1]*0.587, ext[2]*0.114];
+    const axis = w[0] >= w[1] && w[0] >= w[2] ? 0 : (w[1] >= w[2] ? 1 : 2);
+    const n = Math.max(ids.length, 1);
+    return { ids, axis, score: w[axis] * Math.cbrt(ids.length),
+             mean: [Math.round(sum[0]/n), Math.round(sum[1]/n), Math.round(sum[2]/n)] };
+  };
+
+  const all = new Array(count);
+  for (let i = 0; i < count; i++) all[i] = i;
+  let boxes = [mkBox(all)];
+
+  while (boxes.length < maxColors){
+    let bi = -1, best = 0;
+    for (let i = 0; i < boxes.length; i++){
+      if (boxes[i].ids.length > 1 && boxes[i].score > best){ best = boxes[i].score; bi = i; }
+    }
+    if (bi < 0) break;
+    const b = boxes[bi], ch = b.axis;
+    b.ids.sort((p, q) => samples[p*3+ch] - samples[q*3+ch]);
+    const mid = b.ids.length >> 1;
+    boxes.splice(bi, 1, mkBox(b.ids.slice(0, mid)), mkBox(b.ids.slice(mid)));
+  }
+  return boxes.map(b => b.mean);
+}
+
+/** Nearest palette entry, memoised on the top 5 bits of each channel. The
+    cache is what makes this viable: without it every pixel of every frame
+    would run a linear scan over 256 entries. */
+function paletteMapper(pal){
+  const cache = new Int16Array(32768).fill(-1);
+  return (r, g, b) => {
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    const hit = cache[key];
+    if (hit >= 0) return hit;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < pal.length; i++){
+      const dr = r - pal[i][0], dg = g - pal[i][1], db = b - pal[i][2];
+      const d = dr*dr*0.299 + dg*dg*0.587 + db*db*0.114;
+      if (d < bd){ bd = d; best = i; }
+    }
+    cache[key] = best;
+    return best;
+  };
+}
+
+/** GIF's LZW: variable code width from minCodeSize+1 up to 12 bits, with a
+    clear code emitted when the dictionary fills. */
+function lzwEncode(px, minCodeSize){
+  const CLEAR = 1 << minCodeSize, EOI = CLEAR + 1;
+  let codeSize = minCodeSize + 1, next = EOI + 1;
+  let dict = new Map();
+  const bytes = [];
+  let acc = 0, accBits = 0;
+  const put = code => {
+    acc |= code << accBits;
+    accBits += codeSize;
+    while (accBits >= 8){ bytes.push(acc & 0xff); acc >>>= 8; accBits -= 8; }
+  };
+
+  put(CLEAR);
+  let prefix = px[0];
+  for (let i = 1; i < px.length; i++){
+    const k = px[i];
+    const key = (prefix << 8) | k;
+    const found = dict.get(key);
+    if (found !== undefined){ prefix = found; continue; }
+    put(prefix);
+    if (next < 4096){
+      dict.set(key, next);
+      if (next === (1 << codeSize) && codeSize < 12) codeSize++;
+      next++;
+    } else {
+      put(CLEAR);
+      dict = new Map();
+      next = EOI + 1;
+      codeSize = minCodeSize + 1;
+    }
+    prefix = k;
+  }
+  put(prefix);
+  put(EOI);
+  if (accBits > 0) bytes.push(acc & 0xff);
+  return bytes;
+}
+
+/** Assemble the container: header, logical screen descriptor with a global
+    colour table, the NETSCAPE2.0 block that makes it loop forever, then one
+    graphic-control + image-descriptor + LZW payload per frame. */
+function buildGif(frames, w, h, pal, delayCs){
+  const b = [];
+  const str = s => { for (let i = 0; i < s.length; i++) b.push(s.charCodeAt(i)); };
+  const short = v => b.push(v & 255, (v >> 8) & 255);
+
+  const bits = Math.max(2, Math.ceil(Math.log2(Math.max(pal.length, 2))));
+  const entries = 1 << bits;
+
+  str('GIF89a');
+  short(w); short(h);
+  b.push(0x80 | 0x70 | (bits - 1), 0, 0);
+  for (let i = 0; i < entries; i++){
+    const c = pal[i] || [0, 0, 0];
+    b.push(c[0], c[1], c[2]);
+  }
+
+  b.push(0x21, 0xFF, 11); str('NETSCAPE2.0'); b.push(3, 1, 0, 0, 0);
+
+  for (const idx of frames){
+    b.push(0x21, 0xF9, 4, 0x04, delayCs & 255, (delayCs >> 8) & 255, 0, 0);
+    b.push(0x2C); short(0); short(0); short(w); short(h); b.push(0);
+    b.push(bits);
+    const data = lzwEncode(idx, bits);
+    for (let i = 0; i < data.length; i += 255){
+      const chunk = data.slice(i, i + 255);
+      b.push(chunk.length);
+      for (const v of chunk) b.push(v);
+    }
+    b.push(0);
+  }
+  b.push(0x3B);
+  return new Uint8Array(b);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   7c. MOTION EXPORT — animated GIF and WebM video
+   ═══════════════════════════════════════════════════════════════════════ */
+
+let busy = '';           // '' | 'gif' — drives the button label
+let recorder = null;     // MediaRecorder while a video capture is running
+
+/** Yield to the event loop between frames so the tab stays responsive and
+    progress can paint.
+
+    NOT setTimeout(0): browsers clamp timers to one second in a background
+    tab, so ~70 yields turned a sub-second encode into a minute of nothing
+    whenever the window lost focus — which is exactly when you'd expect to
+    leave an export running. A MessageChannel task is not clamped, so the
+    encode runs at full speed foreground or background. */
+const nextTick = (() => {
+  const mc = new MessageChannel();
+  let queue = [];
+  mc.port1.onmessage = () => { const q = queue; queue = []; for (const r of q) r(); };
+  return () => new Promise(res => { queue.push(res); mc.port2.postMessage(0); });
+})();
+
+function downloadBlob(blob, ext){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  a.download = `radiant-burnt_${stamp}.${ext}`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 8000);
+}
+
+/** Drive the simulation forward by exactly one output frame. The live loop
+    is driven by wall-clock deltas, which would make a capture's timing
+    depend on how fast the machine happens to render; stepping by a fixed dt
+    instead makes the exported motion identical on any hardware. */
+function advance(dt){
+  phase += dt;
+  meltPhase += dt * P.meltSpeed;
+  if (P.burnOn && P.playing) stepFluid(phase);
+  renderFrame();
+}
+
+async function exportGIF(){
+  if (busy) return;
+  busy = 'gif'; buildUI();
+
+  const prevW = bufW, prevH = bufH;
+  const prevCssW = canvas.style.width, prevCssH = canvas.style.height;
+  const prevPhase = phase, prevMelt = meltPhase;
+  const ar = aspectRatio();
+
+  const W = Math.max(2, Math.round(P.gifWidth));
+  const H = Math.max(2, Math.round(W / ar));
+  const fps = P.gifFps;
+  const total = Math.max(2, Math.round(P.gifSeconds * fps));
+  const dt = 1 / fps;
+
+  running = false;
+  forceContentVisible = false;
+  setBufferSize(W, H);
+
+  const scratch = document.createElement('canvas');
+  scratch.width = W; scratch.height = H;
+  const sx = scratch.getContext('2d', { willReadFrequently: true });
+
+  try {
+    /* Warm the sim so frame 1 is the settled look rather than a blank
+       buffer — same reasoning as the PNG export. */
+    const p = Math.min(Math.max(P.persistence, 0.5), 0.995);
+    const warm = Math.min(400, Math.max(40, Math.ceil(Math.log(0.02) / Math.log(p))));
+    for (let i = 0; i < warm; i++){ phase += dt; stepFluid(phase); }
+
+    const rgba = [];
+    for (let f = 0; f < total; f++){
+      advance(dt);
+      sx.drawImage(canvas, 0, 0);
+      rgba.push(sx.getImageData(0, 0, W, H).data);
+      busy = `gif:${Math.round(100 * (f + 1) / total * 0.6)}`;
+      updateHud();
+      await nextTick();   // keep the tab responsive
+    }
+
+    /* Sample across every frame so the shared palette covers the whole
+       animation, not just its first moment. */
+    const stride = Math.max(1, Math.floor((W * H * total) / 24000)) * 4;
+    const samples = [];
+    for (const d of rgba){
+      for (let i = 0; i < d.length; i += stride){ samples.push(d[i], d[i+1], d[i+2]); }
+    }
+    const pal = buildPalette(new Uint8Array(samples), 256);
+    const map = paletteMapper(pal);
+
+    const frames = [];
+    for (let f = 0; f < rgba.length; f++){
+      const d = rgba[f], idx = new Uint8Array(W * H);
+      for (let i = 0, j = 0; i < idx.length; i++, j += 4) idx[i] = map(d[j], d[j+1], d[j+2]);
+      frames.push(idx);
+      busy = `gif:${Math.round(60 + 40 * (f + 1) / rgba.length)}`;
+      updateHud();
+      await nextTick();
+    }
+
+    downloadBlob(new Blob([buildGif(frames, W, H, pal, Math.round(100 / fps))],
+                          { type: 'image/gif' }), 'gif');
+  } finally {
+    phase = prevPhase; meltPhase = prevMelt;
+    setBufferSize(prevW, prevH);
+    canvas.style.width = prevCssW; canvas.style.height = prevCssH;
+    running = true;
+    busy = ''; buildUI();
+  }
+}
+
+const VIDEO_TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+
+/** Video goes through MediaRecorder on a canvas stream, so it records the
+    live canvas in real time rather than stepping frames like the GIF path.
+    That keeps it honest — what you watched is what lands in the file. */
+function toggleRecord(){
+  if (recorder && recorder.state === 'recording'){ recorder.stop(); return; }
+  if (typeof MediaRecorder === 'undefined'){
+    assetError = 'this browser has no MediaRecorder'; buildUI(); return;
+  }
+  const mime = VIDEO_TYPES.find(t => MediaRecorder.isTypeSupported(t));
+  if (!mime){ assetError = 'no supported video codec'; buildUI(); return; }
+
+  const stream = canvas.captureStream(60);
+  recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 16e6 });
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
+    downloadBlob(new Blob(chunks, { type: mime }), mime.startsWith('video/mp4') ? 'mp4' : 'webm');
+    recorder = null;
+    buildUI();
+  };
+  recorder.start();
+  buildUI();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    8. CONTROL PANEL (declarative — add a line here to add a control)
    ═══════════════════════════════════════════════════════════════════════ */
 const CONTROLS = [
@@ -1795,7 +2122,8 @@ const CONTROLS = [
    { t:'range', k:'meltScale',     l:'Melt Scale',          min:0.5, max:8.0, step:0.10 },
    { t:'range', k:'meltDrip',      l:'Drip Bias',           min:0, max:1.00,  step:0.01 },
    { t:'range', k:'meltType',      l:'Melt on Metadata',    min:0, max:1.00,  step:0.01 },
-   { t:'range', k:'grain',    l:'Grain Amount',    min:0, max:0.60, step:0.005 },
+   { t:'range', k:'grain',     l:'Grain Amount', min:0, max:0.60, step:0.005 },
+   { t:'range', k:'grainSize', l:'Grain Size',   min:0.5, max:8.00, step:0.10 },
    { t:'range', k:'thresh',   l:'Photocopy Bleed', min:0, max:1.00, step:0.01 },
    { t:'range', k:'contrast', l:'Contrast',        min:0.50, max:2.20, step:0.01 },
  ]},
@@ -1831,6 +2159,15 @@ const CONTROLS = [
      ['Randomize All',  'all'],
    ]},
    { t:'buttons', one:true, defs:[['↓  Export Poster PNG','export']] },
+   { t:'select', k:'gifWidth', l:'GIF Width', num:true,
+     opts:[['320','320 px'],['420','420 px'],['540','540 px'],['720','720 px']] },
+   { t:'select', k:'gifFps', l:'GIF Frame Rate', num:true,
+     opts:[['8','8 fps'],['12','12 fps'],['16','16 fps'],['20','20 fps']] },
+   { t:'range', k:'gifSeconds', l:'GIF Duration (s)', min:1, max:8, step:0.5 },
+   { t:'buttons', one:true, defs:[[()=> busy.startsWith('gif')
+       ? `Encoding GIF… ${busy.split(':')[1] || 0}%` : '↓  Export GIF', 'gif']] },
+   { t:'buttons', one:true, defs:[[()=> recorder && recorder.state === 'recording'
+       ? '■  Stop Recording' : '●  Record Video (WebM)', 'record']] },
  ]},
 ];
 
@@ -2073,8 +2410,13 @@ function buildUI(){
         g.className = 'btns' + (it.one ? ' one' : '');
         for (const [label, action] of it.defs){
           const b = document.createElement('button');
-          b.type = 'button'; b.textContent = label;
+          /* Labels may be functions so a button can report live state
+             (recording / encoding progress) without its own renderer. */
+          b.type = 'button';
+          b.textContent = typeof label === 'function' ? label() : label;
           if (action === 'export') b.className = 'hot';
+          if (action === 'record' && recorder && recorder.state === 'recording') b.className = 'hot';
+          if (busy && action !== 'record') b.disabled = true;
           b.onclick = () => ACTIONS[action]();
           g.appendChild(b);
         }
@@ -2127,7 +2469,9 @@ const ACTIONS = {
     drawHeroMask(bufW, bufH);
     canvas.classList.toggle('manual', P.interactionMode === 'manual');
   },
-  export: exportPNG
+  export: exportPNG,
+  gif:    exportGIF,
+  record: toggleRecord
 };
 document.getElementById('resetBtn').onclick = ACTIONS.reset;
 
