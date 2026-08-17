@@ -261,7 +261,10 @@ const P = {
   lensBlur:0.021, lensFocus:0.83, lensRange:0.90, lensHighlight:5.1,
   lensDistort:-0.31, lensFringe:0.0,
   melt:0.042, meltType:0.85, meltSpeed:1.0,
-  meltHeat:0.55,            // heat input rate
+  /* Held just above the melt point (0.30). Far above it every column is
+     permanently past yield and the field settles into steady flow; close
+     to it, columns cross back and forth and the melt keeps re-forming. */
+  meltHeat:0.35,            // heat input rate
   meltScale:2.2,            // size of the hot / cold patches
   meltPoint:0.30,           // heat at which the material yields
   meltGravity:0.45,
@@ -654,11 +657,13 @@ precision highp float;
 varying vec2 vUv;
 
 uniform sampler2D tPrev;     // own previous state (ping-pong)
-uniform sampler2D tMask;     // content coverage — where there is material at all
+uniform sampler2D tMask;     // static content coverage
+uniform sampler2D tFlow;     // PASS A fluid state — the material as it actually moves
 uniform vec2  uTexel;
 uniform float uAspect;
 uniform float uDt;
 uniform float uSeed;
+uniform float uTime;
 
 uniform float uHeat;         // heat input rate
 uniform float uHeatScale;    // size of the hot / cold patches
@@ -673,7 +678,16 @@ ${NOISE}
 
 void main(){
   vec2 uv  = vUv;
-  float cov = texture2D(tMask, uv).a;
+
+  /* Coverage comes from the LIVE fluid state as well as the static mask.
+     Feeding the sim from the mask alone was the reason it settled: the
+     material it thought it had never changed, so once heat, flow and
+     displacement balanced there was nothing left to perturb it and the
+     field froze at equilibrium. The artwork is moving the whole time —
+     sweeping, drifting, decaying — so taking coverage from the fluid means
+     material genuinely arrives and departs, and the melt keeps being fed
+     new solid to work on for as long as the poster animates. */
+  float cov = max(texture2D(tMask, uv).a, texture2D(tFlow, uv).a);
 
   if (uReset > 0.5){ gl_FragColor = vec4(0.0, 0.0, cov, 0.0); return; }
 
@@ -691,7 +705,13 @@ void main(){
      Applied unevenly, because real melting starts at hot spots and spreads
      — never uniformly across a surface. Lateral diffusion is what lets
      those patches grow into each other instead of staying isolated dots. */
-  float hotspot = fbm(vec2(uv.x * uAspect, uv.y) * uHeatScale + uSeed);
+  /* The hot patches drift. A fixed heat source melts the same places
+     forever and the picture reaches one final shape; a real flame or lamp
+     never holds that still, and letting it wander means regions cool and
+     re-solidify while others start to go. */
+  vec2 hp = vec2(uv.x * uAspect, uv.y) * uHeatScale
+          + uSeed + vec2(uTime * 0.021, uTime * 0.037);
+  float hotspot = fbm(hp);
   float diff = (sUp.w + sDn.w + sL.w + sR.w) * 0.25;
   /* Diffusion is deliberately weak. Conducting heat quickly evens the field
      out within a few seconds, every cell crosses the melt point together,
@@ -1254,8 +1274,9 @@ function resetMelt(){
   for (let i = 0; i < 2; i++){
     gl.bindFramebuffer(gl.FRAMEBUFFER, rtMelt[i].fbo);
     gl.viewport(0, 0, simW, simH);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, rtMelt[1 - i].tex); i1(progMelt,'tPrev',0);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex);           i1(progMelt,'tMask',1);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, rtMelt[1 - i].tex);        i1(progMelt,'tPrev',0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex);                  i1(progMelt,'tMask',1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, rtFluid[fluidFront].tex);  i1(progMelt,'tFlow',2);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1268,10 +1289,12 @@ function stepMelt(dt){
   gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
   gl.viewport(0, 0, simW, simH);
   gl.useProgram(progMelt);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex); i1(progMelt,'tPrev',0);
-  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex); i1(progMelt,'tMask',1);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex);                   i1(progMelt,'tPrev',0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex);                   i1(progMelt,'tMask',1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, rtFluid[fluidFront].tex);   i1(progMelt,'tFlow',2);
   f2(progMelt,'uTexel', 1 / simW, 1 / simH);
   f1(progMelt,'uAspect', simW / simH);
+  f1(progMelt,'uTime', phase);
   /* Clamped so a dropped frame or a paused tab cannot hand the integrator a
      huge timestep and blow the velocity field up. */
   f1(progMelt,'uDt', Math.min(dt, 1 / 30));
