@@ -259,8 +259,13 @@ const P = {
   postOn:true,
   grain:0.0, grainSize:2.0, thresh:0.21, contrast:1.31,
   lensBlur:0.021, lensFocus:0.83, lensRange:0.90, lensHighlight:5.1,
+  lensMode:'partial',       // partial = focus plane + edge falloff | full = whole frame
   lensDistort:-0.31, lensEdge:0.78, lensFringe:0.0,
-  melt:0.042, meltType:0.85, meltSpeed:1.0,
+  /* The leaky integrator settles displacement around 0.14 rather than
+     railing at 1.0, so Melt Amount needs a proportionally wider range to
+     reach the same physical offset. 0.20 here matches what 0.042 produced
+     under the old saturating field. */
+  melt:0.20, meltType:0.85, meltSpeed:1.0,
   /* Held just above the melt point (0.30). Far above it every column is
      permanently past yield and the field settles into steady flow; close
      to it, columns cross back and forth and the melt keeps re-forming. */
@@ -767,18 +772,30 @@ void main(){
      as there is heat to melt more of it. */
   float replaced = clamp(fluxOut * uFlow * uDt * 6.0, 0.0, 1.0);
   disp = mix(disp, sUp.x, replaced);
-  disp = clamp(disp + vel * uDt, 0.0, 1.0);
 
-  /* ── RE-SOLIDIFICATION ─────────────────────────────────────────────────
-     Latent heat cools a running column below its melt point again, and a
-     solid column has no run left in it, so the displacement relaxes out as
-     it sets. That closes the loop: heat, yield, run, cool, set, reheat.
-     Without this last step the sim reaches a quasi-steady state after
-     twenty seconds or so — most of the flowing material pinned against the
-     displacement ceiling, nothing left to watch. The cycle is what keeps
-     it alive indefinitely, and every stage of it is a consequence of the
-     physics rather than a scripted loop. */
-  disp *= 1.0 - (1.0 - melted) * uDt * 0.6;
+  /* ── LEAKY INTEGRATION ─────────────────────────────────────────────────
+     Displacement accumulates velocity but also relaxes, so it settles at
+     roughly velocity/leak instead of climbing until it hits the ceiling.
+
+     A pure integral was the bug behind Melt Amount going dead: within a
+     few seconds 66% of the sheet was pinned at the clamp and 28% was still
+     solid, leaving a field that was effectively binary. Melt Amount had
+     almost nothing to scale, so its response flattened above ~0.03 and the
+     slider stopped doing anything useful over most of its range.
+
+     Leaking keeps the physics — displacement still lags a rising velocity,
+     so acceleration reads — while spreading the field across the range:
+     material running at half speed sits at half the displacement. Solid
+     material leaks faster, because a column that has set has no run left
+     in it. */
+  disp += vel * uDt;
+  disp *= 1.0 - clamp(uDt * (0.15 + 1.20 * (1.0 - melted)), 0.0, 0.5);
+  disp  = clamp(disp, 0.0, 1.0);
+
+  /* Latent heat cools a running column below its melt point again, so it
+     sets and its run relaxes out (handled by the leak term above). That
+     closes the loop: heat, yield, run, cool, set, reheat — every stage a
+     consequence of the physics rather than a scripted animation. */
 
   /* ── SURFACE TENSION ───────────────────────────────────────────────── */
   disp += (sL.x + sR.x - 2.0 * disp) * uTension * uDt * 60.0;
@@ -814,6 +831,7 @@ uniform float uLensRange;   // width of the in-focus band
 uniform float uLensHi;      // highlight weighting for the disc gather
 uniform float uLensDistort; // radial distortion: + barrels, - pincushions
 uniform float uLensEdge;    // field curvature — how much the corners defocus
+uniform float uLensFull;    // 1 = defocus the whole frame evenly, 0 = selective
 uniform float uLensFringe;  // lateral chromatic aberration
 uniform float uMelt;        // how far the simulated run displaces the read
 uniform float uMeltType;    // how much of the metadata type inherits the melt
@@ -1020,14 +1038,19 @@ void main(){
      accumulates smoothly instead of one term abruptly taking over.
 
      Neither term fully closes: the 0.10 floor keeps a trace of softness
-     everywhere, which stops the defocus reading as a mask.            */
+     everywhere, which stops the defocus reading as a mask.
+
+     FULL mode ignores both terms and defocuses the entire frame evenly —
+     a lens focused past everything in shot, rather than one with a plane
+     of focus somewhere inside it.                                      */
   vec2 duv = distortUV(uv, uLensDistort);
   vec2 suv = meltUV(duv, uMelt);
 
   float dFocus = abs(uv.y - uLensFocus);
   float band   = smoothstep(uLensRange * 0.5, uLensRange * 0.5 + 0.35, dFocus);
   float field  = clamp(rr * 4.0, 0.0, 1.0) * uLensEdge;
-  float radius = uLens * (0.10 + 0.90 * clamp(band + field, 0.0, 1.0));
+  float sel    = 0.10 + 0.90 * clamp(band + field, 0.0, 1.0);
+  float radius = uLens * mix(sel, 1.0, uLensFull);
 
   /* One rotation per pixel, shared by both gathers so the artwork and the
      type defocus in step rather than swimming against each other. Driven
@@ -1980,6 +2003,7 @@ function renderFrame(){
   f1(progPost,'uLensHi', P.lensHighlight);
   f1(progPost,'uLensDistort', P.lensDistort * fx);
   f1(progPost,'uLensEdge', P.lensEdge);
+  f1(progPost,'uLensFull', P.lensMode === 'full' ? 1 : 0);
   f1(progPost,'uLensFringe', P.lensFringe * fx);
   f1(progPost,'uMelt', P.melt * fx);
   f1(progPost,'uMeltType', P.meltType);
@@ -2382,13 +2406,15 @@ const CONTROLS = [
  { title:'Post Process', items:[
    { t:'toggle', k:'postOn', l:'Enable Post Process', big:true },
    { t:'range', k:'lensBlur',      l:'Lens Blur (Bokeh)',   min:0, max:0.100, step:0.001 },
+   { t:'segmented', k:'lensMode', l:'Blur Coverage',
+     opts:[['partial','Partial'],['full','Full Frame']] },
+   { t:'range', k:'lensFocus',     l:'Focus Plane',    min:0, max:1.00, step:0.01, show:p=>p.lensMode==='partial' },
+   { t:'range', k:'lensRange',     l:'Focus Band',     min:0, max:1.00, step:0.01, show:p=>p.lensMode==='partial' },
+   { t:'range', k:'lensEdge',      l:'Edge Softness',  min:0, max:1.00, step:0.01, show:p=>p.lensMode==='partial' },
    { t:'range', k:'lensDistort',   l:'Lens Distortion',     min:-0.60, max:0.60, step:0.01 },
    { t:'range', k:'lensFringe',    l:'Lens Fringing (RGB)', min:0, max:3.00,  step:0.01 },
-   { t:'range', k:'lensFocus',     l:'Focus Plane',         min:0, max:1.00,  step:0.01 },
-   { t:'range', k:'lensRange',     l:'Focus Band',          min:0, max:1.00,  step:0.01 },
-   { t:'range', k:'lensEdge',      l:'Edge Softness',       min:0, max:1.00,  step:0.01 },
    { t:'range', k:'lensHighlight', l:'Highlight Bloom',     min:0, max:8.00,  step:0.10 },
-   { t:'range', k:'melt',        l:'Melt Amount',      min:0, max:0.120, step:0.001 },
+   { t:'range', k:'melt',        l:'Melt Amount',      min:0, max:0.500, step:0.005 },
    { t:'range', k:'meltSpeed',   l:'Melt Speed',       min:0, max:6.00,  step:0.05 },
    { t:'range', k:'meltHeat',    l:'Heat',             min:0, max:2.00,  step:0.01 },
    { t:'range', k:'meltPoint',   l:'Melt Point',       min:0, max:0.80,  step:0.01 },
@@ -2732,7 +2758,7 @@ const ACTIONS = {
     P.lensDistort = rnd(-0.20, 0.35);
     P.lensFringe  = rnd(0.20, 1.30);
     P.lensFocus   = rnd(0.30, 0.75);
-    P.melt        = rnd(0.00, 0.055);
+    P.melt        = rnd(0.00, 0.30);
     P.meltHeat    = rnd(0.30, 1.10);
     P.meltVisc    = rnd(0.60, 2.60);
     buildUI();
