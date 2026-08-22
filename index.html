@@ -1,9 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>RADIANT BURNT — Generative Poster Maker</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <!-- ══════════════════════════════════════════════════════════════════════════
      RADIANT BURNT / ANALOG SCANNER ARTIFACTS   (v3.0 — fluid feedback pipeline)
@@ -56,21 +53,9 @@
 
 <style>
 :root{
-  /* Light editorial palette carried over from the Circle typeface tool:
-     paper ground, near-black ink, hairline rules, monospace throughout.
-     Emphasis is an ink fill rather than a colour accent, so --hot is ink. */
-  --bg:#fafafa;      /* stage ground */
-  --panel:#fafafa;   /* control column */
-  --panel2:#ffffff;  /* input wells */
-  --line:#dcdcdc;    /* hairline rules */
-  --hover:#f0f0f0;   /* hover wash */
-  --track:#d4d4d4;   /* slider track */
-  --ink:#0a0a0a;     /* text, borders, emphasis fills */
-  --dim:#737373;     /* secondary labels */
-  --hot:#0a0a0a;
-  --mono:"IBM Plex Mono","JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --bg:#0a0a0b; --panel:#101012; --panel2:#161619; --line:#26262b;
+  --ink:#e8e8ea; --dim:#75757e; --hot:#ff3b18; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
 }
-::selection{background:#0a0a0a;color:#fafafa}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
@@ -81,37 +66,38 @@ body{
 
 /* ─── STAGE ────────────────────────────────────────────────────────────── */
 #stage{
-  position:relative; display:grid; place-items:center; padding:32px; min-width:0; min-height:0;
-  background:var(--bg);
+  position:relative; display:grid; place-items:center; padding:28px; min-width:0; min-height:0;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #131316 0%, #0a0a0b 60%),
+    repeating-linear-gradient(45deg,#0c0c0e 0 2px,transparent 2px 8px);
 }
 #gl{
   display:block; max-width:100%; max-height:100%;
-  border:1px solid var(--ink);
-  background:#fff;
+  box-shadow:0 40px 90px -20px #000, 0 0 0 1px #000, 0 0 60px -30px var(--hot);
+  background:#000;
 }
 #gl.manual{cursor:crosshair}
 #hud{
-  position:absolute; left:16px; bottom:12px; color:var(--dim); font-size:11px;
-  letter-spacing:.13em; text-transform:uppercase; pointer-events:none; user-select:none;
+  position:absolute; left:14px; bottom:10px; color:var(--dim); font-size:10px;
+  letter-spacing:.14em; text-transform:uppercase; pointer-events:none; user-select:none;
 }
-#hud b{color:var(--ink);font-weight:500}
+#hud b{color:var(--hot);font-weight:400}
 
 /* ─── PANEL ────────────────────────────────────────────────────────────── */
 #panel{
-  background:var(--panel); border-right:1px solid var(--ink);
+  background:var(--panel); border-right:1px solid var(--line);
   overflow-y:auto; overflow-x:hidden; scrollbar-width:thin;
   scrollbar-color:var(--line) transparent;
 }
 #panel::-webkit-scrollbar{width:8px}
 #panel::-webkit-scrollbar-thumb{background:var(--line)}
 .brand{
-  padding:14px 16px 13px; border-bottom:1px solid var(--ink); position:sticky; top:0;
+  padding:14px 16px 13px; border-bottom:1px solid var(--line); position:sticky; top:0;
   background:var(--panel); z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px;
 }
 .brand h1{font-size:15px;letter-spacing:.2em;font-weight:600}
-.brand h1 span{color:var(--dim)}
-.brand p{color:var(--dim);font-size:10px;letter-spacing:.09em;margin-top:5px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand h1 span{color:var(--hot)}
+.brand p{color:var(--dim);font-size:11px;letter-spacing:.1em;margin-top:5px}
 #resetBtn{width:auto;padding:7px 11px;font-size:10.5px;flex:none}
 
 section{border-bottom:1px solid var(--line)}
@@ -133,22 +119,22 @@ section.closed .body{display:none}
 
 /* sliders */
 input[type=range]{
-  -webkit-appearance:none;appearance:none;width:100%;height:4px;background:var(--track);
-  outline:none;cursor:ew-resize;margin:10px 0 4px;
+  -webkit-appearance:none;appearance:none;width:100%;height:2px;background:var(--line);
+  outline:none;cursor:ew-resize;margin:9px 0 3px;
 }
 input[type=range]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:13px;height:13px;background:var(--ink);
-  border-radius:50%;cursor:ew-resize;transition:transform .12s;
+  -webkit-appearance:none;width:11px;height:11px;background:var(--ink);
+  border-radius:50%;cursor:ew-resize;transition:background .12s;
 }
-input[type=range]:hover::-webkit-slider-thumb{transform:scale(1.15)}
-input[type=range]::-moz-range-thumb{width:13px;height:13px;background:var(--ink);border:0;border-radius:50%;cursor:ew-resize}
+input[type=range]:hover::-webkit-slider-thumb{background:var(--hot)}
+input[type=range]::-moz-range-thumb{width:11px;height:11px;background:var(--ink);border:0;border-radius:50%;cursor:ew-resize}
 .slot{margin-bottom:11px}
 .slot .row{margin-bottom:0}
 
 /* colors */
 input[type=color]{
-  -webkit-appearance:none;appearance:none;width:38px;height:22px;padding:0;
-  border:1px solid var(--ink);background:none;cursor:pointer;
+  -webkit-appearance:none;appearance:none;width:34px;height:20px;padding:0;
+  border:1px solid var(--line);background:none;cursor:pointer;
 }
 input[type=color]::-webkit-color-swatch-wrapper{padding:0}
 input[type=color]::-webkit-color-swatch{border:none}
@@ -170,26 +156,19 @@ button{
   font:500 11px var(--mono);letter-spacing:.1em;padding:10px 9px;cursor:pointer;
   text-transform:uppercase;transition:.12s;width:100%;
 }
-button:hover{background:var(--hover);border-color:var(--ink);color:var(--ink)}
+button:hover{background:var(--hot);border-color:var(--hot);color:#000}
 button:active{transform:translateY(1px)}
-button.hot{background:var(--ink);border-color:var(--ink);color:var(--panel);font-weight:700}
-button.hot:hover{background:#000;color:#fff}
+button.hot{background:var(--hot);border-color:var(--hot);color:#000;font-weight:700}
+button.hot:hover{filter:brightness(1.18)}
 .btns{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px}
 .btns.one{grid-template-columns:1fr}
 
-/* Segmented buttons: one bordered strip with hairline dividers between
-   cells (no gaps), active cell filled with ink — the Circle pattern. */
-.seg{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--ink);margin-bottom:11px}
-.seg button{
-  border:0;border-left:1px solid var(--ink);border-top:1px solid var(--ink);
-  padding:9px 8px;background:var(--panel);
-}
-.seg button:nth-child(2n+1){border-left:0}   /* first cell of each row */
-.seg button:nth-child(-n+2){border-top:0}    /* first row */
-.seg button:hover{background:var(--hover)}
-.seg button.on{background:var(--ink);color:var(--panel);font-weight:700}
-.seg button.act{font-weight:600}
-.seg button.act:hover{background:var(--ink);color:var(--panel)}
+/* segmented (2-way) toggle buttons, e.g. Pause/Play, Manual/Auto */
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:11px}
+.seg button{padding:8px}
+.seg button.on{background:var(--ink);border-color:var(--ink);color:#000;font-weight:700}
+.seg button.act{border-color:var(--hot);color:var(--hot)}
+.seg button.act:hover{background:var(--hot);color:#000}
 
 /* file upload */
 .filebtn{position:relative;overflow:hidden;margin-bottom:9px}
@@ -198,25 +177,16 @@ button.hot:hover{background:#000;color:#fff}
 
 /* palette swatches */
 .pal{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:11px}
-.sw{height:30px;border:1px solid var(--ink);cursor:pointer;position:relative;overflow:hidden}
-.sw:hover{outline:2px solid var(--ink);outline-offset:1px}
+.sw{height:30px;border:1px solid var(--line);cursor:pointer;position:relative;overflow:hidden}
+.sw:hover{border-color:var(--ink)}
 .sw i{position:absolute;top:0;bottom:0;width:33.34%}
 .sw i:nth-child(1){left:0}.sw i:nth-child(2){left:33.33%}.sw i:nth-child(3){left:66.66%}
 
 .toggle{display:flex;align-items:center;gap:8px;margin-bottom:9px;cursor:pointer;user-select:none}
-/* Pill switch: ink outline, ink knob on paper when off, inverted when on.
-   The knob moves via transform rather than `left`, so it can never resolve
-   against the control's static position and travel past the track end. */
-.toggle input{
-  appearance:none;-webkit-appearance:none;width:36px;height:20px;border:1px solid var(--ink);
-  border-radius:999px;background:var(--panel);position:relative;cursor:pointer;flex:none;transition:background .15s;
-}
-.toggle input::after{
-  content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:999px;
-  background:var(--ink);transition:transform .15s, background .15s;
-}
-.toggle input:checked{background:var(--ink)}
-.toggle input:checked::after{transform:translateX(16px);background:var(--panel)}
+.toggle input{appearance:none;-webkit-appearance:none;width:26px;height:14px;background:var(--line);position:relative;cursor:pointer;flex:none;transition:.15s}
+.toggle input::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;background:var(--dim);transition:.15s}
+.toggle input:checked{background:var(--hot)}
+.toggle input:checked::after{left:14px;background:#000}
 .toggle span{color:var(--dim);font-size:11.5px;letter-spacing:.04em}
 .toggle.big{margin-bottom:12px}
 .toggle.big span{color:var(--ink);font-size:12px;font-weight:600;letter-spacing:.08em}
@@ -224,10 +194,10 @@ button.hot:hover{background:#000;color:#fff}
 /* responsive: panel becomes a bottom drawer */
 @media (max-width:880px){
   body{grid-template-columns:1fr;grid-template-rows:1fr 46vh}
-  #panel{border-right:0;border-top:1px solid var(--ink)}
-  #stage{padding:16px}
+  #panel{border-right:0;border-top:1px solid var(--line)}
+  #stage{padding:14px}
 }
-#fatal{position:fixed;inset:0;display:none;place-items:center;background:var(--bg);color:var(--ink);
+#fatal{position:fixed;inset:0;display:none;place-items:center;background:#0a0a0b;color:var(--hot);
   text-align:center;padding:40px;letter-spacing:.1em;z-index:99}
 </style>
 
