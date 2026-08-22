@@ -2685,7 +2685,15 @@ function fmt(v, spec){
   return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(3).replace(/0+$/,'').replace(/\.$/,'.0');
 }
 
-const HERO_KEYS = new Set(['title','fontSize','aspect','contentType','assetScale','edgeBlur']);
+/* Any parameter that changes the RASTERISED hero mask must be listed here,
+   otherwise its control updates P but never re-runs drawHeroMask() and the
+   canvas appears frozen until some unrelated redraw happens to fire.
+   Purely shader-side parameters (e.g. contentColor) do NOT belong here —
+   they are read fresh every frame. */
+const HERO_KEYS = new Set([
+  'title','fontSize','tracking','leading','wordSpacing',
+  'aspect','contentType','assetScale','edgeBlur',
+]);
 const TYPO_KEYS = new Set([
   'subtitle','kicker','date','serial','aspect','metaLabel','metaOn',
   'metaScale','metaTrack','metaLead','metaLabelGap','metaWeight','metaCase',
