@@ -60,8 +60,8 @@
 html,body{height:100%}
 body{
   background:var(--bg); color:var(--ink); overflow:hidden;
-  font:400 12px/1.4 var(--mono); -webkit-font-smoothing:antialiased;
-  display:grid; grid-template-columns:312px 1fr;
+  font:400 13px/1.45 var(--mono); -webkit-font-smoothing:antialiased;
+  display:grid; grid-template-columns:356px 1fr;
 }
 
 /* ─── STAGE ────────────────────────────────────────────────────────────── */
@@ -95,14 +95,14 @@ body{
   padding:14px 16px 13px; border-bottom:1px solid var(--line); position:sticky; top:0;
   background:var(--panel); z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px;
 }
-.brand h1{font-size:13px;letter-spacing:.2em;font-weight:600}
+.brand h1{font-size:15px;letter-spacing:.2em;font-weight:600}
 .brand h1 span{color:var(--hot)}
-.brand p{color:var(--dim);font-size:10px;letter-spacing:.1em;margin-top:5px}
-#resetBtn{width:auto;padding:6px 9px;font-size:9px;flex:none}
+.brand p{color:var(--dim);font-size:11px;letter-spacing:.1em;margin-top:5px}
+#resetBtn{width:auto;padding:7px 11px;font-size:10.5px;flex:none}
 
 section{border-bottom:1px solid var(--line)}
 section>h2{
-  font-size:10px; letter-spacing:.18em; color:var(--dim); font-weight:500;
+  font-size:11.5px; letter-spacing:.16em; color:var(--dim); font-weight:600;
   padding:11px 16px; cursor:pointer; display:flex; justify-content:space-between;
   align-items:center; user-select:none; text-transform:uppercase;
 }
@@ -114,8 +114,8 @@ section.closed .body{display:none}
 .body.dim>*:not(:first-child){opacity:.32;pointer-events:none;filter:saturate(0)}
 
 .row{display:flex;align-items:center;gap:8px;margin-bottom:9px}
-.row label{flex:1;color:var(--dim);font-size:10px;letter-spacing:.07em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row .val{width:46px;text-align:right;font-size:10px;color:var(--ink);font-variant-numeric:tabular-nums}
+.row label{flex:1;color:var(--dim);font-size:11.5px;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .val{width:54px;text-align:right;font-size:11.5px;color:var(--ink);font-variant-numeric:tabular-nums}
 
 /* sliders */
 input[type=range]{
@@ -143,17 +143,17 @@ input[type=color]::-moz-color-swatch{border:none}
 /* text + selects */
 input[type=text],select,textarea{
   width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-  font:400 11px var(--mono);padding:7px 8px;outline:none;
+  font:400 12.5px var(--mono);padding:9px 10px;outline:none;
 }
-textarea{resize:vertical;min-height:52px}
+textarea{resize:vertical;min-height:60px}
 input[type=text]:focus,select:focus,textarea:focus{border-color:var(--hot)}
-.fld{margin-bottom:9px}
-.fld span{display:block;color:var(--dim);font-size:9px;letter-spacing:.16em;margin-bottom:4px;text-transform:uppercase}
+.fld{margin-bottom:11px}
+.fld span{display:block;color:var(--dim);font-size:10.5px;letter-spacing:.13em;margin-bottom:5px;text-transform:uppercase}
 
 /* buttons */
 button{
   background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-  font:500 10px var(--mono);letter-spacing:.13em;padding:9px 8px;cursor:pointer;
+  font:500 11px var(--mono);letter-spacing:.1em;padding:10px 9px;cursor:pointer;
   text-transform:uppercase;transition:.12s;width:100%;
 }
 button:hover{background:var(--hot);border-color:var(--hot);color:#000}
@@ -167,11 +167,13 @@ button.hot:hover{filter:brightness(1.18)}
 .seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:11px}
 .seg button{padding:8px}
 .seg button.on{background:var(--ink);border-color:var(--ink);color:#000;font-weight:700}
+.seg button.act{border-color:var(--hot);color:var(--hot)}
+.seg button.act:hover{background:var(--hot);color:#000}
 
 /* file upload */
 .filebtn{position:relative;overflow:hidden;margin-bottom:9px}
 .filebtn input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
-.filebtn .name{display:block;margin-top:4px;color:var(--dim);font-size:9px;letter-spacing:.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filebtn .name{display:block;margin-top:5px;color:var(--dim);font-size:10.5px;letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* palette swatches */
 .pal{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:11px}
@@ -185,9 +187,9 @@ button.hot:hover{filter:brightness(1.18)}
 .toggle input::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;background:var(--dim);transition:.15s}
 .toggle input:checked{background:var(--hot)}
 .toggle input:checked::after{left:14px;background:#000}
-.toggle span{color:var(--dim);font-size:10px;letter-spacing:.07em}
+.toggle span{color:var(--dim);font-size:11.5px;letter-spacing:.04em}
 .toggle.big{margin-bottom:12px}
-.toggle.big span{color:var(--ink);font-size:10.5px;font-weight:600;letter-spacing:.1em}
+.toggle.big span{color:var(--ink);font-size:12px;font-weight:600;letter-spacing:.08em}
 
 /* responsive: panel becomes a bottom drawer */
 @media (max-width:880px){
@@ -228,6 +230,9 @@ const P = {
   contentType:'text',       // 'text' | 'image' | 'svg'
   title:"don't\nbe\na b*tch",
   fontSize:1.30,
+  tracking:-0.02,           // letter-spacing, as a multiple of the fitted size
+  leading:0.86,             // line height, as a multiple of the fitted size
+  wordSpacing:0.0,          // extra gap at spaces, as a multiple of the fitted size
   assetScale:1.0,
   edgeBlur:20,
   contentColor:'#ff4000',   // the core: what the content resolves to once it saturates
@@ -310,7 +315,7 @@ const P = {
   /* Seed is pinned rather than randomised at load so the poster comes up as
      the tuned composition every time. Randomize Seed still works at runtime
      — this only fixes the starting point. */
-  aspect:'2:3', seed:445.37439142258927, frozen:false, exportH:2400,
+  aspect:'2:3', seed:445.37439142258927, exportH:2400,
   gifWidth:420, gifFps:12, gifSeconds:3.0
 };
 const DEFAULTS = JSON.parse(JSON.stringify(P));
@@ -1505,26 +1510,41 @@ function loadFontFile(file, targetKey){
   reader.readAsArrayBuffer(file);
 }
 
-/** Draw text with manual letter-spacing (tracking). Supports left/right/center. */
-function tracked(ctx, text, x, y, track, align){
+/** Draw text with manual letter-spacing (tracking) and optional extra word
+    spacing applied at space characters. Supports left/right/center. */
+function tracked(ctx, text, x, y, track, align, wordGap){
+  wordGap = wordGap || 0;
   const chars = [...text];
+  const adv = c => ctx.measureText(c).width + track + (c === ' ' ? wordGap : 0);
   let total = 0;
-  for (const c of chars) total += ctx.measureText(c).width + track;
+  for (const c of chars) total += adv(c);
   if (chars.length) total -= track;
   let cx = align === 'right' ? x - total : align === 'center' ? x - total/2 : x;
-  for (const c of chars){ ctx.fillText(c, cx, y); cx += ctx.measureText(c).width + track; }
+  for (const c of chars){ ctx.fillText(c, cx, y); cx += adv(c); }
   return total;
 }
 
-/** Greedy word wrap honouring explicit \n line breaks. */
-function wrap(ctx, text, maxW){
+/** Advance width of a line including tracking and extra word spacing, so
+    measurement matches exactly what tracked() will draw. */
+function lineWidth(ctx, text, track, wordGap){
+  track = track || 0; wordGap = wordGap || 0;
+  const chars = [...text];
+  let total = 0;
+  for (const c of chars) total += ctx.measureText(c).width + track + (c === ' ' ? wordGap : 0);
+  if (chars.length) total -= track;
+  return total;
+}
+
+/** Greedy word wrap honouring explicit \n line breaks. Tracking and word gap
+    are optional (metadata callers pass neither and get plain measurement). */
+function wrap(ctx, text, maxW, track, wordGap){
   const out = [];
   for (const para of text.split('\n')){
     let line = '';
     for (const word of para.split(/\s+/)){
       if (!word) continue;
       const test = line ? line + ' ' + word : word;
-      if (ctx.measureText(test).width > maxW && line){ out.push(line); line = word; }
+      if (lineWidth(ctx, test, track, wordGap) > maxW && line){ out.push(line); line = word; }
       else line = test;
     }
     out.push(line);
@@ -1592,21 +1612,28 @@ function drawHeroMask(W, H){
     const maxH   = Math.max(1, (botLim - topLim) * P.fontSize);
 
     const text = P.title.trim() || 'BURNT';
+    /* Tracking / leading / word spacing are all expressed as multiples of the
+       fitted size, so they stay proportional at any export resolution. The
+       auto-fit loop has to account for tracking too, otherwise wide tracking
+       would overflow the measured width. */
     let px = 0.30 * W, lines = [], lead = 0;
     for (let guard = 0; guard < 60; guard++){
       c.font = `900 ${px}px ${heroFont()}`;
-      lines = wrap(c, text, cw);
-      lead  = px * 0.86;
-      const widest = Math.max(...lines.map(l => c.measureText(l).width), 0);
+      const tr = px * P.tracking;
+      const wg = px * P.wordSpacing;
+      lines = wrap(c, text, cw, tr, wg);
+      lead  = px * P.leading;
+      const widest = Math.max(...lines.map(l => lineWidth(c, l, tr, wg)), 0);
       if (lines.length * lead <= maxH && widest <= cw) break;
       px *= 0.955;
       if (px < 0.02 * W) break;
     }
     c.font = `900 ${px}px ${heroFont()}`;
-    const track  = -px * 0.02;
-    const blockH = lines.length * lead;
-    const top0   = topLim + (botLim - topLim - blockH) / 2 + px * 0.78;
-    lines.forEach((ln, i) => tracked(c, ln, W / 2, top0 + i * lead, track, 'center'));
+    const track   = px * P.tracking;
+    const wordGap = px * P.wordSpacing;
+    const blockH  = lines.length * lead;
+    const top0    = topLim + (botLim - topLim - blockH) / 2 + px * 0.78;
+    lines.forEach((ln, i) => tracked(c, ln, W / 2, top0 + i * lead, track, 'center', wordGap));
   }
 
   /* Source Edge Blur: soften the mask before it enters the simulation. */
@@ -2032,7 +2059,7 @@ function renderFrame(){
 
      Skipped entirely when melt is off, so the buffer stays cold and
      turning the amount up starts a fresh melt. */
-  if (P.postOn && P.melt > 0.0005 && !P.frozen){
+  if (P.postOn && P.melt > 0.0005 && P.playing){
     meltAccum += Math.min(simDt, 0.1) * P.meltSpeed;
     let n = 0;
     while (meltAccum >= MELT_DT && n < 6){ stepMelt(MELT_DT); meltAccum -= MELT_DT; n++; }
@@ -2195,8 +2222,11 @@ function loop(now){
   const raw = now - last;
   const dt  = Math.min(raw / 1000, 0.05);
   last = now;
-  if (running && !P.frozen) noteFrameInterval(raw);
-  if (!P.frozen){ phase += dt; simDt = dt; }
+  /* Pause is now the single stop control (the separate Freeze toggle is
+     gone), so it halts the master clock as well as the fluid step —
+     otherwise the post-process animation would keep running while paused. */
+  if (running && P.playing) noteFrameInterval(raw);
+  if (P.playing){ phase += dt; simDt = dt; }
   if (running) renderFrame();
   requestAnimationFrame(loop);
 }
@@ -2551,19 +2581,23 @@ function toggleRecord(){
    ═══════════════════════════════════════════════════════════════════════ */
 const CONTROLS = [
  { title:'Content Source', items:[
-   { t:'segmented', k:'contentType', opts:[['text','Text'],['image','Image'],['svg','SVG']] },
+   // Randomize All rides the segmented grid so it fills the empty cell next to SVG.
+   { t:'segmented', k:'contentType', opts:[['text','Text'],['image','Image'],['svg','SVG']],
+     action:['Randomize All','all'] },
    { t:'textarea', k:'title', l:'Text Content', show:p=>p.contentType==='text' },
-   { t:'range', k:'fontSize', l:'Font Size', min:0.30, max:1.30, step:0.01, show:p=>p.contentType==='text' },
+   { t:'range', k:'fontSize',    l:'Font Size',    min:0.30, max:1.30, step:0.01, show:p=>p.contentType==='text' },
+   { t:'range', k:'tracking',    l:'Tracking',     min:-0.15, max:0.50, step:0.005, show:p=>p.contentType==='text' },
+   { t:'range', k:'leading',     l:'Leading',      min:0.55, max:2.00, step:0.01, show:p=>p.contentType==='text' },
+   { t:'range', k:'wordSpacing', l:'Word Spacing', min:0, max:1.00, step:0.01, show:p=>p.contentType==='text' },
    { t:'file', k:'imageAsset', l:'Logo / Image', accept:'image/*', show:p=>p.contentType==='image' },
    { t:'file', k:'svgAsset', l:'SVG Logo', accept:'.svg,image/svg+xml', show:p=>p.contentType==='svg' },
    { t:'range', k:'assetScale', l:'Asset Scale', min:0.2, max:2.0, step:0.01, show:p=>p.contentType!=='text' },
-   { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
    { t:'colors', keys:[['contentColor','Content Color (text / logo core)']] },
    { t:'font', k:'customFontHero', l:'Custom Font', accept:'.ttf,.otf,.woff,.woff2' },
  ]},
  { title:'Fluid & Interaction', items:[
    { t:'toggle', k:'burnOn', l:'Enable Radiant Burnt Effect', big:true },
-   { t:'segmented', k:'playing', l:'Animation', opts:[[true,'Pause'],[false,'Play']], invert:true },
+   { t:'segmented', k:'playing', l:'Animation', opts:[[false,'Pause'],[true,'Play']] },
    { t:'segmented', k:'interactionMode', opts:[['manual','Manual'],['auto','Auto']] },
    { t:'select', k:'animPreset', l:'Animation Preset', show:p=>p.interactionMode==='auto',
      opts:Object.entries(ANIM_PRESETS) },
@@ -2579,6 +2613,7 @@ const CONTROLS = [
    { t:'range', k:'persistence', l:'Persistence (Decay)', min:0.50, max:0.99, step:0.002 },
    { t:'range', k:'fluidWarp', l:'Fluid Warp', min:0.00, max:0.30, step:0.002 },
    { t:'range', k:'warpScale', l:'Warp Scale', min:0.5, max:8.0, step:0.1 },
+   { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
  ]},
  { title:'Optical Effects', items:[
    { t:'colors', keys:[['glowPrimary','Primary Glow Color'],['glowSecondary','Secondary Glow Color'],['burnColor','Burn Color (hot edge)'],['ground','Ground / Paper']] },
@@ -2609,43 +2644,27 @@ const CONTROLS = [
    { t:'range', k:'meltFlow',    l:'Flow (mass)',      min:0, max:3.00,  step:0.05 },
    { t:'range', k:'meltSpread',  l:'Spread (softness)', min:0, max:40.0, step:0.5 },
    { t:'range', k:'meltTension', l:'Surface Tension',  min:0, max:0.08,  step:0.001 },
-   { t:'range', k:'meltType',    l:'Melt on Metadata', min:0, max:1.00,  step:0.01 },
    { t:'range', k:'grain',     l:'Grain Amount', min:0, max:0.60, step:0.005 },
    { t:'range', k:'grainSize', l:'Grain Size',   min:0.5, max:8.00, step:0.10 },
    { t:'range', k:'thresh',   l:'Photocopy Bleed', min:0, max:1.00, step:0.01 },
    { t:'range', k:'contrast', l:'Contrast',        min:0.50, max:2.20, step:0.01 },
  ]},
- { title:'Metadata Typography', items:[
-   { t:'toggle', k:'metaOn', l:'Enable Metadata Type', big:true },
-   { t:'textarea', k:'subtitle', l:'Stacked Block (one name per line)' },
-   { t:'text', k:'metaLabel', l:'Block Label' },
-   { t:'text', k:'kicker',    l:'Kicker (top left)' },
-   { t:'text', k:'date',      l:'Date (top right)' },
-   { t:'text', k:'serial',    l:'Serial (foot)' },
-   { t:'range', k:'metaScale',    l:'Type Scale',  min:0.50, max:2.50, step:0.01 },
-   { t:'range', k:'metaTrack',    l:'Tracking',    min:0.00, max:0.60, step:0.005 },
-   { t:'range', k:'metaLead',     l:'Leading',     min:0.80, max:1.60, step:0.01 },
-   { t:'range', k:'metaLabelGap', l:'Label Gap',   min:0.00, max:4.00, step:0.05 },
-   { t:'select', k:'metaWeight', l:'Weight', num:true,
-     opts:[['300','Light'],['400','Regular'],['500','Medium'],['600','Semibold'],['700','Bold'],['800','Extrabold'],['900','Black']] },
-   { t:'segmented', k:'metaCase', l:'Case',
-     opts:[['asis','As Is'],['upper','UPPER'],['snake','snake_case']] },
-   { t:'toggle', k:'metaMono', l:'Monospace' },
-   { t:'colors', keys:[['ink','Ink Color']] },
-   { t:'select', k:'textMode', l:'Metadata Blend Mode', num:true,
-     opts:[['0','Normal'],['1','Multiply'],['2','Screen'],['3','Difference']] },
-   { t:'font', k:'customFontMeta', l:'Custom Font (override)', accept:'.ttf,.otf,.woff,.woff2' },
- ]},
- { title:'Output', items:[
+ { title:'Export', items:[
    { t:'select', k:'aspect', l:'Aspect Ratio',
-     opts:[['2:3','2:3 — ISO Poster'],['3:4','3:4'],['4:5','4:5'],['1:1','1:1 Square'],['210:297','A-Series']] },
+     opts:[
+       ['2:3','2:3 — Portrait Poster'],
+       ['3:4','3:4 — Portrait'],
+       ['4:5','4:5 — Portrait'],
+       ['210:297','A-Series — Portrait'],
+       ['1:1','1:1 — Square'],
+       ['3:2','3:2 — Landscape'],
+       ['4:3','4:3 — Landscape'],
+       ['5:4','5:4 — Landscape'],
+       ['16:9','16:9 — Widescreen'],
+       ['297:210','A-Series — Landscape'],
+     ] },
    { t:'select', k:'exportH', l:'Export Height', num:true,
      opts:[['1600','1600 px'],['2400','2400 px'],['3200','3200 px'],['4200','4200 px']] },
-   { t:'toggle', k:'frozen', l:'Freeze Animation  (Space)' },
-   { t:'buttons', defs:[
-     ['Randomize Seed', 'seed'],
-     ['Randomize All',  'all'],
-   ]},
    { t:'buttons', one:true, defs:[['↓  Export Poster PNG','export']] },
    { t:'select', k:'gifWidth', l:'GIF Width', num:true,
      opts:[['320','320 px'],['420','420 px'],['540','540 px'],['720','720 px']] },
@@ -2833,9 +2852,21 @@ function buildUI(){
         for (const [val, label] of it.opts){
           const b = document.createElement('button');
           b.type = 'button'; b.textContent = label;
-          const isOn = it.invert ? (label==='Pause' ? P[it.k]===true : P[it.k]===false) : P[it.k] === val;
-          if (isOn) b.classList.add('on');
+          /* Straight value match. The old `invert` special-case inverted the
+             HIGHLIGHT but not the click, so Pause set playing=true and Play
+             set playing=false — the buttons did the opposite of their label. */
+          if (P[it.k] === val) b.classList.add('on');
           b.onclick = () => { P[it.k] = val; touched(it.k); buildUI(); };
+          g.appendChild(b);
+        }
+        /* Optional trailing action button that shares the segmented grid, so
+           it fills the empty cell beside an odd number of options. */
+        if (it.action){
+          const [label, act] = it.action;
+          const b = document.createElement('button');
+          b.type = 'button'; b.textContent = label;
+          b.classList.add('act');
+          b.onclick = () => ACTIONS[act]();
           g.appendChild(b);
         }
         body.appendChild(g);
@@ -3006,7 +3037,7 @@ if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {
 
 document.addEventListener('keydown', e => {
   if (e.target.matches('input,select,textarea')) return;
-  if (e.code === 'Space'){ e.preventDefault(); P.frozen = !P.frozen; buildUI(); }
+  if (e.code === 'Space'){ e.preventDefault(); P.playing = !P.playing; buildUI(); }
   if (e.key === 'r' || e.key === 'R') ACTIONS.seed();
   if (e.key === 'e' || e.key === 'E') exportPNG();
 });
