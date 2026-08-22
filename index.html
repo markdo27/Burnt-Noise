@@ -234,7 +234,11 @@ const P = {
   leading:0.86,             // line height, as a multiple of the fitted size
   wordSpacing:0.0,          // extra gap at spaces, as a multiple of the fitted size
   assetScale:1.0,
-  edgeBlur:20,
+  edgeBlur:6,               // heavy pre-blur is the main cause of glyphs merging
+  meltSource:true,          // let the source shape itself drip away
+  separateGlyphs:true,      // keep adjacent letterforms from fusing into a blob
+  waterDrip:true,
+  dripAmount:0.55,
   contentColor:'#ff4000',   // the core: what the content resolves to once it saturates
   customFontHero:null,      // font-family name once a custom font is loaded, else null
 
@@ -417,6 +421,8 @@ uniform float uWarp;
 uniform float uWarpScale;
 uniform vec2  uDragDir;
 uniform float uDither;      // 1.0 only on the 8-bit fallback path
+uniform float uMeltSource;  // 1.0 = the source shape itself is allowed to flow away
+uniform float uDrip;        // water-drip gravity strength
 uniform float uTime;
 uniform float uSeed;
 /* Frame delta expressed in 60Hz frames: dt * 60. Exactly 1.0 at 60fps, so
@@ -451,7 +457,29 @@ void main(){
      trail read as a ladder of discrete copies. FLOW_STEP brings a step
      down to ~1% of the frame, so material flows instead of teleporting. */
   const float FLOW_STEP = 0.03;
-  vec2 flow = (uDragDir + turb) * uSmear * (0.22 + influence * 1.6) * FLOW_STEP * uStep;
+
+  /* WATER DRIP.
+     A pure brush smear moves every pixel the same way, which reads as a
+     wipe rather than a liquid. Real running liquid does two things: it
+     falls under gravity regardless of which way the brush travelled, and
+     it runs faster where there is more of it. So add a downward term
+     weighted by the material actually sitting here (mass), broken into
+     per-column rivulets by a hash on x — that is what makes some columns
+     race ahead into fingers while their neighbours lag, instead of the
+     whole edge sliding down as one sheet. */
+  float mass    = texture2D(tPrev, uv).a;
+  float rivulet = 0.35 + 1.30 * hash11(floor(P.x * 90.0) + uSeed * 3.7);
+
+  /* Gate the fall on the erase phase. Running the drip at full strength
+     the whole time means the shape is bleeding downward even while it is
+     still being fed, so it never holds still long enough to be read — it
+     just sits there permanently molten. Holding it to a faint baseline
+     until the sweep starts erasing gives the sequence people expect:
+     forms up, holds legible, then runs once the feed stops. */
+  float dripGate = mix(0.08, 1.0, uSweepHide);
+  vec2  drip = vec2(0.0, -1.0) * uDrip * rivulet * (0.25 + 0.95 * mass) * dripGate;
+
+  vec2 flow = ((uDragDir + turb) * uSmear * (0.22 + influence * 1.6) + drip) * FLOW_STEP * uStep;
   vec2 srcUV = clamp(uv - vec2(flow.x / uAspect, flow.y), 0.0, 1.0);
 
   float advected = texture2D(tPrev, srcUV).a;
@@ -468,7 +496,13 @@ void main(){
      the raw mask, so this buffer is purely the flowing trail.        */
   const float INFLOW = 3.0;
   float ca = contentSweep(vUv, uSweepReveal, uSweepHide, uSweepSoft);
-  float inject = fresh * clamp(influence, 0.0, 1.0) * ca;
+  /* With Melt Source Text on, the shape is fed at full strength wherever
+     the sweep says it is present, rather than only under the brush — the
+     glyphs read solid while the feed lasts, and once the sweep stops
+     feeding them the drip and decay carry them off. Brush-weighted
+     injection is kept for the other mode, where the crisp shape is
+     composited separately downstream and this buffer is only the trail. */
+  float inject = fresh * ca * mix(clamp(influence, 0.0, 1.0), 1.0, uMeltSource);
   /* Decay is exponential in TIME, not in frames rendered. Raising the
      per-frame factor to the power of the step turns "keep 96% each frame"
      into "keep 96% each 60th of a second", which is the same curve at
@@ -576,7 +610,9 @@ varying vec2 vUv;
 
 uniform sampler2D tFluid;   // Pass A output — pure fluid trail (brush-weighted)
 uniform sampler2D tGlow;    // Pass B output — blurred version of tFluid
-uniform sampler2D tMask;    // raw content mask — always-visible crisp core
+uniform sampler2D tMask;    // raw content mask
+uniform float uMeltSource;  // 1.0 = read the shape from the fluid so it can melt away
+uniform float uSeparate;    // 1.0 = tighten falloff so adjacent glyphs stay distinct
 uniform vec3  uGround;
 uniform vec3  uPrimary, uSecondary;
 uniform vec3  uContent;     // the core — what the content resolves to when it saturates
@@ -620,10 +656,24 @@ vec3 thermalAt(vec2 uv){
      with the fluid trail — the fluid buffer only ever holds brush-weighted
      material, so without this the core would fade wherever the brush
      currently isn't. */
-  float core = max(texture2D(tMask, uv).a * contentSweep(uv, uSweepReveal, uSweepHide, uSweepSoft),
-                   texture2D(tFluid, uv).a);
+  float rawCore   = texture2D(tMask, uv).a * contentSweep(uv, uSweepReveal, uSweepHide, uSweepSoft);
+  float fluidCore = texture2D(tFluid, uv).a;
+
+  /* Melt Source Text: when on, the visible shape is read ONLY from the
+     fluid buffer, so it can drip and dissolve. The max() below is what
+     used to pin the raw mask on top at full strength, which is why the
+     source text stayed crisp and never melted no matter what the fluid
+     did underneath it. */
+  float core = mix(max(rawCore, fluidCore), fluidCore, uMeltSource);
+
+  /* Keep Glyphs Separate: nearby letters merge into one blob because each
+     one's wide glow fills the gap between them from both sides. Tightening
+     the core's falloff and easing off the glow's additive fill lets the
+     gaps stay dark so the letterforms read individually. */
+  core = mix(core, smoothstep(0.10, 0.62, core), uSeparate);
+
   float glow = texture2D(tGlow, uv).a;
-  float t = clamp(core + glow * 0.85, 0.0, 1.0);
+  float t = clamp(core + glow * mix(0.85, 0.30, uSeparate), 0.0, 1.0);
   /* Exposure (Burn) reshapes the intensity curve: low exposure keeps most
      of the frame in the cool (user-coloured) range; high exposure pushes
      more of it into the built-in hot core, so the control has a real,
@@ -2013,6 +2063,8 @@ function stepFluid(t, dt){
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex); i1(progFluid,'tPrev',0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex); i1(progFluid,'tMask',1);
   f1(progFluid,'uDither', HDR_OK ? 0 : 1);
+  f1(progFluid,'uMeltSource', P.meltSource ? 1 : 0);
+  f1(progFluid,'uDrip', P.waterDrip ? P.dripAmount : 0);
   f1(progFluid,'uAspect', simAR);
   f2(progFluid,'uBrush', flow.brush.x * simAR, flow.brush.y);
   f1(progFluid,'uBrushRadius', P.brushRadius);
@@ -2136,6 +2188,8 @@ function renderFrame(){
   f1(progThermal,'uRgbSplit', P.rgbSplitGlow);
   f1(progThermal,'uExposure', P.exposure);
   f1(progThermal,'uFlat', P.burnOn ? 0 : 1);
+  f1(progThermal,'uMeltSource', P.meltSource ? 1 : 0);
+  f1(progThermal,'uSeparate', P.separateGlyphs ? 1 : 0);
   f1(progThermal,'uSweepReveal', sweep.reveal);
   f1(progThermal,'uSweepHide', sweep.hide);
   f1(progThermal,'uSweepSoft', sweepSoftness());
@@ -2614,12 +2668,16 @@ const CONTROLS = [
    { t:'range', k:'fluidWarp', l:'Fluid Warp', min:0.00, max:0.30, step:0.002 },
    { t:'range', k:'warpScale', l:'Warp Scale', min:0.5, max:8.0, step:0.1 },
    { t:'range', k:'edgeBlur', l:'Source Edge Blur', min:0, max:20, step:0.5 },
+   { t:'toggle', k:'meltSource', l:'Melt Source Text' },
+   { t:'toggle', k:'waterDrip',  l:'Water Drip' },
+   { t:'range',  k:'dripAmount', l:'Drip Amount', min:0, max:2.00, step:0.01, show:p=>p.waterDrip },
  ]},
  { title:'Optical Effects', items:[
    { t:'colors', keys:[['glowPrimary','Primary Glow Color'],['glowSecondary','Secondary Glow Color'],['burnColor','Burn Color (hot edge)'],['ground','Ground / Paper']] },
    { t:'range', k:'rgbSplitGlow', l:'RGB Split (Aberration)', min:0, max:0.025, step:0.0005 },
    { t:'range', k:'glowSoftness', l:'Glow Softness', min:0, max:60, step:0.5 },
    { t:'range', k:'exposure', l:'Exposure (Burn)', min:0.0, max:2.5, step:0.01 },
+   { t:'toggle', k:'separateGlyphs', l:'Keep Glyphs Separate' },
  ]},
  { title:'Post Process', items:[
    { t:'toggle', k:'postOn', l:'Enable Post Process', big:true },
@@ -2665,12 +2723,12 @@ const CONTROLS = [
      ] },
    { t:'select', k:'exportH', l:'Export Height', num:true,
      opts:[['1600','1600 px'],['2400','2400 px'],['3200','3200 px'],['4200','4200 px']] },
-   { t:'buttons', one:true, defs:[['↓  Export Poster PNG','export']] },
    { t:'select', k:'gifWidth', l:'GIF Width', num:true,
      opts:[['320','320 px'],['420','420 px'],['540','540 px'],['720','720 px']] },
    { t:'select', k:'gifFps', l:'GIF Frame Rate', num:true,
      opts:[['8','8 fps'],['12','12 fps'],['16','16 fps'],['20','20 fps']] },
    { t:'range', k:'gifSeconds', l:'GIF Duration (s)', min:1, max:8, step:0.5 },
+   { t:'buttons', one:true, defs:[['↓  Export Poster PNG','export']] },
    { t:'buttons', one:true, defs:[[()=> busy.startsWith('gif')
        ? `Encoding GIF… ${busy.split(':')[1] || 0}%` : '↓  Export GIF', 'gif']] },
    { t:'buttons', one:true, defs:[[()=> recorder && recorder.state === 'recording'
