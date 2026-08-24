@@ -229,7 +229,7 @@ const P = {
   // ── Content Source ──
   contentType:'text',       // 'text' | 'image' | 'svg'
   title:"don't\nbe\na b*tch",
-  fontSize:1.30,
+  fontSize:1.00,          // 1.0 = fitted to the margins; above that it bleeds past them
   tracking:-0.02,           // letter-spacing, as a multiple of the fitted size
   leading:0.86,             // line height, as a multiple of the fitted size
   wordSpacing:0.0,          // extra gap at spaces, as a multiple of the fitted size
@@ -1659,7 +1659,14 @@ function drawHeroMask(W, H){
 
     const topLim = M + 0.075 * W;
     const botLim = H - M - 0.10 * W;
-    const maxH   = Math.max(1, (botLim - topLim) * P.fontSize);
+    /* The fit is to the frame itself. Font Size used to be folded in here,
+       as a fraction of the height budget, which capped it at the fit: the
+       loop only ever shrinks from its starting size, so once the type was
+       no longer height-bound the value stopped changing anything. Every
+       setting from 1.0 up rendered the same poster. It scales the fitted
+       result now instead, so the whole range does something and the type
+       can bleed past the margins. */
+    const maxH   = Math.max(1, botLim - topLim);
 
     const text = P.title.trim() || 'BURNT';
     /* Tracking / leading / word spacing are all expressed as multiples of the
@@ -1678,6 +1685,14 @@ function drawHeroMask(W, H){
       px *= 0.955;
       if (px < 0.02 * W) break;
     }
+    /* Applied after the fit, so 1.0 is exactly "as large as the margins
+       allow" and anything above it overflows them deliberately. The line
+       breaks stay as they were fitted, which keeps the composition and
+       changes only its size. lead has to be recomputed - the loop left it
+       holding a value derived from the pre-scaled size. */
+    px  *= P.fontSize;
+    lead = px * P.leading;
+
     c.font = `900 ${px}px ${heroFont()}`;
     const track   = px * P.tracking;
     const wordGap = px * P.wordSpacing;
@@ -2722,7 +2737,7 @@ const CONTROLS = [
    { t:'segmented', k:'contentType', opts:[['text','Text'],['image','Image'],['svg','SVG']],
      action:['Randomize All','all'] },
    { t:'textarea', k:'title', l:'Text Content', show:p=>p.contentType==='text' },
-   { t:'range', k:'fontSize',    l:'Font Size',    min:0.30, max:1.30, step:0.01, show:p=>p.contentType==='text' },
+   { t:'range', k:'fontSize',    l:'Font Size',    min:0, max:3.00, step:0.01, show:p=>p.contentType==='text' },
    { t:'range', k:'tracking',    l:'Tracking',     min:-0.15, max:0.50, step:0.005, show:p=>p.contentType==='text' },
    { t:'range', k:'leading',     l:'Leading',      min:0.55, max:2.00, step:0.01, show:p=>p.contentType==='text' },
    { t:'range', k:'wordSpacing', l:'Word Spacing', min:0, max:1.00, step:0.01, show:p=>p.contentType==='text' },
