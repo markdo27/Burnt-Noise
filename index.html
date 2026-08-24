@@ -2282,7 +2282,80 @@ function loop(now){
   if (running && P.playing) noteFrameInterval(raw);
   if (P.playing){ phase += dt; simDt = dt; }
   if (running) renderFrame();
+  if (P.playing) syncTimeline();
   requestAnimationFrame(loop);
+}
+
+/* ── TIMELINE ───────────────────────────────────────────────────────────
+   Both simulations are history-dependent: their state is the accumulation
+   of every step taken to get here, so unlike the brush position there is
+   no closed form for "the frame at t = 9.4s". Landing on an exact frame
+   means rebuilding the sim up to it, which is the same wind-up the export
+   already runs — so scrubbing and exporting agree by construction, and
+   the frame you stop on is the frame you get.
+
+   The wind-up is short while the handle is moving and full on release,
+   which keeps dragging responsive without settling for a rough frame. */
+let timelineInput = null, timelineVal = null, playSegButtons = [];
+
+/** One full pass of the animation. Ping-pong runs out and back, so its
+    cycle is twice the period before it repeats. */
+function cycleSeconds(){
+  const period = Math.max(2.0, 160 / Math.max(P.autoSpeed, 0.5));
+  return P.autoLoopMode === 'pingpong' ? period * 2 : period;
+}
+
+/** Where the current phase sits in that cycle, 0..1. */
+function timelineU(){
+  const c = cycleSeconds();
+  return c > 0 ? (((phase % c) + c) % c) / c : 0;
+}
+
+/** Warm-up long enough for the trail to have decayed to ~2%, derived from
+    the decay rate rather than guessed, so a long persistence still lands
+    on a settled frame and a short one does not pay for steps it cannot
+    see. */
+function settleSteps(){
+  const p = Math.min(Math.max(P.persistence, 0.5), 0.995);
+  return Math.min(500, Math.max(40, Math.ceil(Math.log(0.02) / Math.log(p))));
+}
+
+/** Rebuild both simulations so they are settled AT time t. */
+function settleAt(t, steps){
+  const dt = 1 / 24;
+  resetFluid();
+  resetMelt();
+  meltAccum = 0;
+  let u = t - steps * dt;
+  for (let i = 0; i < steps; i++){
+    u += dt;
+    stepFluid(u);
+    if (P.melt > 0.0005) stepMelt(dt * P.meltSpeed);
+  }
+  phase = t;
+}
+
+/** Scrubbing is a transport action: it stops playback, because a handle
+    that fights the clock for control of the same value is unusable. */
+function scrubTo(u, fast){
+  P.playing = false;
+  syncPlayButtons();
+  settleAt(u * cycleSeconds(), fast ? Math.min(60, settleSteps()) : settleSteps());
+  renderFrame();
+}
+
+/** Move the handle to follow playback. Skipped while the control has
+    focus so it cannot fight the user's own drag or arrow keys. */
+function syncTimeline(){
+  if (!timelineInput || document.activeElement === timelineInput) return;
+  timelineInput.value = timelineU();
+  if (timelineVal) timelineVal.textContent = (timelineU() * cycleSeconds()).toFixed(2) + 's';
+}
+
+/** Reflect P.playing on the Pause/Play buttons without a full buildUI(),
+    which would tear the timeline slider out from under an active drag. */
+function syncPlayButtons(){
+  for (const [val, btn] of playSegButtons) btn.classList.toggle('on', P[ 'playing' ] === val);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -2307,12 +2380,22 @@ function exportPNG(){
   forceContentVisible = true;   // a static export should never land mid-fade of the content cycle
   setBufferSize(W, H);   // resets fluid buffers at the new resolution
 
-  if (P.burnOn && P.playing){
+  /* setBufferSize() just cleared both simulations, so they have to be
+     rebuilt before anything downstream can be composited — and that is
+     true whether the transport is playing or paused. Gating this on
+     P.playing is exactly what made a paused export write a pure black
+     PNG: nothing refilled the fluid buffer, and every pass that reads it
+     had nothing to read.
+
+     The wind-up now ends ON the current phase instead of running past it,
+     so a paused export lands on the frame being looked at rather than one
+     warm-up further along. */
+  if (P.burnOn){
     const target = 0.02;
     const p = Math.min(Math.max(P.persistence, 0.5), 0.995);
     const steps = Math.min(500, Math.max(40, Math.ceil(Math.log(target) / Math.log(p))));
     const dt = 1 / 24;
-    let t = phase;
+    let t = phase - steps * dt;
     for (let i = 0; i < steps; i++){ t += dt; stepFluid(t); if (P.melt > 0.0005) stepMelt(dt * P.meltSpeed); }
     phase = t;
   }
@@ -2660,6 +2743,7 @@ const CONTROLS = [
      show:p=>p.interactionMode==='auto' && DIRECTIONAL.has(p.animPreset),
      opts:[['ttb','Top to Bottom'],['btt','Bottom to Top'],['ltr','Left to Right'],['rtl','Right to Left']] },
    { t:'segmented', k:'autoLoopMode', l:'Auto Loop Mode', opts:[['wrap','Wrap'],['pingpong','Ping-Pong']], show:p=>p.interactionMode==='auto' },
+   { t:'timeline', l:'Timeline (scrub to a frame)', show:p=>p.interactionMode==='auto' },
    { t:'select', k:'autoEasing', l:'Auto Easing', show:p=>p.interactionMode==='auto',
      opts:[['linear','Linear'],['easein','Ease In'],['easeout','Ease Out'],['easeinout','Ease In-Out']] },
    { t:'range', k:'brushRadius', l:'Brush Radius (+ wipe feather)', min:0.03, max:0.80, step:0.01 },
@@ -2816,6 +2900,9 @@ function loadAssetFile(file, kind){
 
 function buildUI(){
   ui.innerHTML = '';
+  /* Every node below is about to be replaced, so anything holding one is
+     now pointing at a detached element. */
+  timelineInput = null; timelineVal = null; playSegButtons = [];
   for (const sec of CONTROLS){
     const s = document.createElement('section');
     const h = document.createElement('h2');
@@ -2867,6 +2954,31 @@ function buildUI(){
         };
         slot.append(row, inp);
         body.appendChild(slot);
+      }
+
+      else if (it.t === 'timeline'){
+        const slot = document.createElement('div');
+        slot.className = 'slot';
+        const row = document.createElement('div');
+        row.className = 'row';
+        const val = document.createElement('div');
+        val.className = 'val';
+        row.innerHTML = `<label>${it.l}</label>`;
+        row.appendChild(val);
+        const inp = document.createElement('input');
+        inp.type = 'range'; inp.autocomplete = 'off';
+        inp.min = 0; inp.max = 1; inp.step = 0.001;
+        inp.value = timelineU();
+        const show = () => { val.textContent = (parseFloat(inp.value) * cycleSeconds()).toFixed(2) + 's'; };
+        show();
+        /* Short wind-up while dragging, full one on release. The step is
+           1/1000 of the cycle — finer than a frame at any usable speed —
+           so the arrow keys walk it frame by frame once focused. */
+        inp.oninput  = () => { show(); scrubTo(parseFloat(inp.value), true); };
+        inp.onchange = () => { show(); scrubTo(parseFloat(inp.value), false); };
+        slot.append(row, inp);
+        body.appendChild(slot);
+        timelineInput = inp; timelineVal = val;
       }
 
       else if (it.t === 'text'){
@@ -2923,6 +3035,7 @@ function buildUI(){
              set playing=false — the buttons did the opposite of their label. */
           if (P[it.k] === val) b.classList.add('on');
           b.onclick = () => { P[it.k] = val; touched(it.k); buildUI(); };
+          if (it.k === 'playing') playSegButtons.push([val, b]);
           g.appendChild(b);
         }
         /* Optional trailing action button that shares the segmented grid, so
