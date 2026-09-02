@@ -51,160 +51,336 @@
      on-screen state rather than a blank first frame.
      ══════════════════════════════════════════════════════════════════════ -->
 
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;800&display=swap" rel="stylesheet">
+
 <style>
+/* ══════════════════════════════════════════════════════════════════════════
+   UI built in the same language as the Nuftext tool, which in turn sits on
+   the ASTA design system (MIT): a monospace framework where everything
+   aligns to a character grid, surfaces are flat, and every border is the
+   same 2px rule. Spacing is quantised to one line-height so the whole
+   column lands on a consistent rhythm rather than assorted pixel values.
+
+   Colour follows the same rule Nuftext settled on: the chrome is
+   monochrome and a single accent is reserved for exactly one job —
+   marking what is currently ON. Anything inert stays grey, so an accent
+   anywhere on screen is always readable as live state, and the poster
+   stays the only place real colour appears.
+
+   Dark is the default here rather than ASTA's light-first order, since a
+   glowing thermal canvas is what this tool is for. The light tokens are
+   kept and reachable from the theme button.
+   ═══════════════════════════════════════════════════════════════════════ */
 :root{
-  --bg:#0a0a0b; --panel:#101012; --panel2:#161619; --line:#26262b;
-  --ink:#e8e8ea; --dim:#75757e; --hot:#ff3b18; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --line-height:1.20rem;
+  --border-thickness:2px;
+
+  --spacing-half:calc(var(--line-height) / 2);
+  --spacing-1:var(--line-height);
+  --spacing-1-5:calc(var(--line-height) * 1.5);
+  --spacing-2:calc(var(--line-height) * 2);
+
+  --text-color:#fff;
+  --text-color-alt:#9a9a9a;
+  --background-color:#000;
+  --background-color-alt:#141414;
+  --surface-band:#1e1e1e;
+  --accent:#ff7a3c;
+  --accent-ink:#000;
+
+  --font-weight-normal:500;
+  --font-weight-medium:600;
+  --font-weight-bold:800;
+
+  font-family:var(--font-family);
+  font-weight:var(--font-weight-normal);
+  font-variant-numeric:tabular-nums lining-nums;
+  font-size:15px;
+  color-scheme:dark;
 }
-*{box-sizing:border-box;margin:0;padding:0}
+:root[data-theme='light']{
+  --text-color:#000;
+  --text-color-alt:#5a5a5a;
+  --background-color:#fff;
+  --background-color-alt:#ededed;
+  --surface-band:#e0e0e0;
+  --accent:#b3350a;
+  --accent-ink:#fff;
+  color-scheme:light;
+}
+
+*,*::before,*::after{box-sizing:border-box;min-width:0}
+*{margin:0;padding:0}
 html,body{height:100%}
 body{
-  background:var(--bg); color:var(--ink); overflow:hidden;
-  font:400 13px/1.45 var(--mono); -webkit-font-smoothing:antialiased;
-  display:grid; grid-template-columns:356px 1fr;
+  background:var(--background-color); color:var(--text-color);
+  line-height:var(--line-height); overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+  display:grid; grid-template-columns:46ch 1fr;
 }
+button,input,select,textarea,output{font:inherit;font-variant-numeric:inherit;color:inherit}
 
 /* ─── STAGE ────────────────────────────────────────────────────────────── */
 #stage{
-  position:relative; display:grid; place-items:center; padding:28px; min-width:0; min-height:0;
-  background:
-    radial-gradient(120% 90% at 50% 0%, #131316 0%, #0a0a0b 60%),
-    repeating-linear-gradient(45deg,#0c0c0e 0 2px,transparent 2px 8px);
+  position:relative; display:grid; place-items:center; min-width:0; min-height:0;
+  overflow:hidden; background:var(--background-color-alt);
+  padding:var(--spacing-2) 2ch var(--spacing-2);
+}
+/* Character-cell graph paper, ruled off the same rhythm as the panel. */
+#stage::before{
+  content:''; position:absolute; inset:0; pointer-events:none; opacity:.07;
+  background-image:
+    linear-gradient(var(--text-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--text-color) 1px, transparent 1px);
+  background-size:2ch var(--line-height);
 }
 #gl{
   display:block; max-width:100%; max-height:100%;
-  box-shadow:0 40px 90px -20px #000, 0 0 0 1px #000, 0 0 60px -30px var(--hot);
-  background:#000;
+  border:var(--border-thickness) solid var(--text-color);
+  background:#000; position:relative;
 }
 #gl.manual{cursor:crosshair}
 #hud{
-  position:absolute; left:14px; bottom:10px; color:var(--dim); font-size:10px;
-  letter-spacing:.14em; text-transform:uppercase; pointer-events:none; user-select:none;
+  position:absolute; left:2ch; bottom:calc(var(--line-height) / 2);
+  color:var(--text-color-alt); font-size:.68rem;
+  letter-spacing:.1ch; text-transform:uppercase; pointer-events:none; user-select:none;
 }
-#hud b{color:var(--hot);font-weight:400}
+#hud b{color:var(--accent);font-weight:var(--font-weight-bold)}
 
 /* ─── PANEL ────────────────────────────────────────────────────────────── */
 #panel{
-  background:var(--panel); border-right:1px solid var(--line);
-  overflow-y:auto; overflow-x:hidden; scrollbar-width:thin;
-  scrollbar-color:var(--line) transparent;
+  height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  background:var(--background-color);
+  border-right:var(--border-thickness) solid var(--text-color);
 }
-#panel::-webkit-scrollbar{width:8px}
-#panel::-webkit-scrollbar-thumb{background:var(--line)}
+#ui{overflow-y:auto; overscroll-behavior:contain; padding-bottom:var(--spacing-2)}
+#ui::-webkit-scrollbar{width:8px}
+#ui::-webkit-scrollbar-thumb{background:var(--text-color-alt)}
+
 .brand{
-  padding:14px 16px 13px; border-bottom:1px solid var(--line); position:sticky; top:0;
-  background:var(--panel); z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px;
+  flex:none; display:flex; align-items:center; gap:1ch;
+  padding:var(--spacing-1) 2ch;
+  border-bottom:var(--border-thickness) solid var(--text-color);
 }
-.brand h1{font-size:15px;letter-spacing:.2em;font-weight:600}
-.brand h1 span{color:var(--hot)}
-.brand p{color:var(--dim);font-size:11px;letter-spacing:.1em;margin-top:5px}
-#resetBtn{width:auto;padding:7px 11px;font-size:10.5px;flex:none}
+.brand h1{
+  font-size:1.2rem; font-weight:var(--font-weight-bold); text-transform:uppercase;
+  letter-spacing:.05ch; line-height:var(--line-height); white-space:nowrap;
+}
+.brand h1 span{color:var(--accent)}
+.brand p{
+  margin-top:calc(var(--line-height) / 4); color:var(--text-color-alt);
+  font-size:.72rem; text-transform:uppercase; letter-spacing:.12ch;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.brand-actions{display:flex;align-items:center;gap:1ch;margin-left:auto;flex:none}
+.brand-actions button{width:auto;padding:0 1ch;font-size:.7rem}
 
-section{border-bottom:1px solid var(--line)}
+/* ─── Collapsible sections ─────────────────────────────────────────────────
+   Each header is a filled band carrying a boxed number, so scrolling the
+   column shows a run of solid bars to aim at instead of twenty identical
+   rows of text. The open one takes an accent rule down its left edge, so
+   you can see where you are without reading anything. */
+section{border-bottom:var(--border-thickness) solid var(--text-color)}
 section>h2{
-  font-size:11.5px; letter-spacing:.16em; color:var(--dim); font-weight:600;
-  padding:11px 16px; cursor:pointer; display:flex; justify-content:space-between;
-  align-items:center; user-select:none; text-transform:uppercase;
+  display:flex; align-items:center; gap:1.5ch;
+  padding:calc(var(--line-height) * .75) 2ch;
+  cursor:pointer; user-select:none; text-transform:uppercase;
+  font-weight:var(--font-weight-bold); font-size:.9rem; letter-spacing:.08ch;
+  background:var(--surface-band);
+  border-left:4px solid var(--accent);
 }
-section>h2:hover{color:var(--ink)}
-section>h2::after{content:"−";color:var(--dim);font-size:13px}
-section.closed>h2::after{content:"+"}
+section.closed>h2{border-left-color:transparent}
+section>h2:hover{background:var(--background-color-alt)}
+/* Boxed index chip. Filled so it reads as a marker, not part of the title. */
+section>h2 .num{
+  display:inline-grid; place-content:center; min-width:3ch; height:var(--line-height);
+  padding:0 .5ch; background:var(--accent); color:var(--accent-ink);
+  font-size:.7rem; font-weight:var(--font-weight-bold);
+}
+section.closed>h2 .num{background:var(--text-color);color:var(--background-color)}
+section>h2::after{
+  content:'−'; margin-left:auto; font-size:1rem;
+  font-weight:var(--font-weight-bold); color:var(--text-color-alt);
+}
+section.closed>h2::after{content:'+'}
 section.closed .body{display:none}
-.body{padding:2px 16px 15px}
-.body.dim>*:not(:first-child){opacity:.32;pointer-events:none;filter:saturate(0)}
 
-.row{display:flex;align-items:center;gap:8px;margin-bottom:9px}
-.row label{flex:1;color:var(--dim);font-size:11.5px;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row .val{width:54px;text-align:right;font-size:11.5px;color:var(--ink);font-variant-numeric:tabular-nums}
+.body{padding:var(--spacing-1) 2ch var(--spacing-1-5); border-left:4px solid transparent}
+.body.dim>*:not(:first-child){opacity:.35;pointer-events:none;filter:saturate(0)}
 
-/* sliders */
+/* ─── Sliders ──────────────────────────────────────────────────────────────
+   ASTA ships no range component; drawn here in the same language — a rule
+   one border-thickness tall and a thumb that is a solid character cell. */
+.slot{margin-top:var(--spacing-1)}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:1ch}
+.row label{
+  color:var(--text-color); font-size:.78rem; letter-spacing:.04ch;
+  font-weight:var(--font-weight-medium);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+/* The readout is what you watch while dragging, so it is boxed and set at
+   full contrast rather than the same grey as its own label. */
+.row .val{
+  flex:none; color:var(--text-color); background:var(--background-color-alt);
+  padding:0 .6ch; font-size:.74rem; font-weight:var(--font-weight-bold);
+  font-variant-numeric:tabular-nums; white-space:nowrap;
+}
 input[type=range]{
-  -webkit-appearance:none;appearance:none;width:100%;height:2px;background:var(--line);
-  outline:none;cursor:ew-resize;margin:9px 0 3px;
+  -webkit-appearance:none;appearance:none;width:100%;height:var(--line-height);
+  background:transparent;cursor:ew-resize;border:0;padding:0;
+}
+input[type=range]::-webkit-slider-runnable-track{
+  height:4px;background:var(--background-color-alt);border:1px solid var(--text-color-alt);
+}
+input[type=range]::-moz-range-track{
+  height:4px;background:var(--background-color-alt);border:1px solid var(--text-color-alt);
 }
 input[type=range]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:11px;height:11px;background:var(--ink);
-  border-radius:50%;cursor:ew-resize;transition:background .12s;
+  -webkit-appearance:none;width:1.6ch;height:var(--line-height);
+  background:var(--text-color);border:2px solid var(--background-color);border-radius:0;
+  margin-top:calc((4px - var(--line-height)) / 2);
 }
-input[type=range]:hover::-webkit-slider-thumb{background:var(--hot)}
-input[type=range]::-moz-range-thumb{width:11px;height:11px;background:var(--ink);border:0;border-radius:50%;cursor:ew-resize}
-.slot{margin-bottom:11px}
-.slot .row{margin-bottom:0}
+input[type=range]::-moz-range-thumb{
+  width:1.6ch;height:var(--line-height);background:var(--text-color);
+  border:2px solid var(--background-color);border-radius:0;
+}
+input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
+input[type=range]:hover::-moz-range-thumb{background:var(--accent)}
 
-/* colors */
+/* ─── Form controls ───────────────────────────────────────────────────── */
+button,select,textarea,input[type=text],input[type=color],.filebtn{
+  border:var(--border-thickness) solid var(--text-color);
+  background:var(--background-color); color:var(--text-color);
+  border-radius:0;-webkit-appearance:none;appearance:none;
+}
+button{
+  display:block;width:100%;height:calc(var(--line-height) * 2);padding:0 1ch;
+  text-transform:uppercase;font-weight:var(--font-weight-medium);font-size:.78rem;
+  letter-spacing:.06ch;cursor:pointer;text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+button:hover{background:var(--background-color-alt)}
+button:active{transform:translate(2px,2px)}   /* ASTA's tactile press */
+button:focus-visible,select:focus,textarea:focus,input:focus-visible{
+  --border-thickness:3px;outline:none;
+}
+/* The accent's one job: showing what is currently on. */
+button.on{
+  background:var(--accent);border-color:var(--accent);color:var(--accent-ink);
+  font-weight:var(--font-weight-bold);
+}
+button.on:hover{background:var(--accent);filter:brightness(1.1)}
+/* A primary action is emphasis, not state — inverted rather than accented,
+   so a live mode is never confused with a button that merely looks loud. */
+button.hot{
+  background:var(--text-color);color:var(--background-color);
+  font-weight:var(--font-weight-bold);
+}
+button.hot:hover{background:var(--text-color);filter:brightness(.85)}
+button:disabled{opacity:.35;cursor:wait;transform:none}
+
+.fld{display:block;margin-top:var(--spacing-1)}
+.fld span{
+  display:block;color:var(--text-color-alt);font-size:.72rem;text-transform:uppercase;
+  letter-spacing:.1ch;margin-bottom:calc(var(--line-height) / 4);
+  font-weight:var(--font-weight-medium);
+}
+select,textarea,input[type=text]{
+  width:100%;font-size:.84rem;
+  padding:calc(var(--line-height) / 2 - var(--border-thickness)) calc(1ch - var(--border-thickness));
+}
+select{height:calc(var(--line-height) * 2);cursor:pointer}
+textarea{resize:vertical;min-height:calc(var(--line-height) * 5);line-height:var(--line-height)}
+
 input[type=color]{
-  -webkit-appearance:none;appearance:none;width:34px;height:20px;padding:0;
-  border:1px solid var(--line);background:none;cursor:pointer;
+  width:100%;height:calc(var(--line-height) * 2);padding:2px;cursor:pointer;
 }
 input[type=color]::-webkit-color-swatch-wrapper{padding:0}
-input[type=color]::-webkit-color-swatch{border:none}
-input[type=color]::-moz-color-swatch{border:none}
+input[type=color]::-webkit-color-swatch{border:0}
+input[type=color]::-moz-color-swatch{border:0}
 
-/* text + selects */
-input[type=text],select,textarea{
-  width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-  font:400 12.5px var(--mono);padding:9px 10px;outline:none;
-}
-textarea{resize:vertical;min-height:60px}
-input[type=text]:focus,select:focus,textarea:focus{border-color:var(--hot)}
-.fld{margin-bottom:11px}
-.fld span{display:block;color:var(--dim);font-size:10.5px;letter-spacing:.13em;margin-bottom:5px;text-transform:uppercase}
+/* Colour rows keep the label/control split of a slider head. */
+.row.colorrow{margin-top:var(--spacing-1)}
+.row.colorrow input[type=color]{width:8ch;flex:none}
 
-/* buttons */
-button{
-  background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-  font:500 11px var(--mono);letter-spacing:.1em;padding:10px 9px;cursor:pointer;
-  text-transform:uppercase;transition:.12s;width:100%;
-}
-button:hover{background:var(--hot);border-color:var(--hot);color:#000}
-button:active{transform:translateY(1px)}
-button.hot{background:var(--hot);border-color:var(--hot);color:#000;font-weight:700}
-button.hot:hover{filter:brightness(1.18)}
-.btns{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px}
+/* ─── Grouped rows ────────────────────────────────────────────────────── */
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:1ch;margin-top:var(--spacing-1)}
 .btns.one{grid-template-columns:1fr}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:1ch;margin-top:var(--spacing-1)}
 
-/* segmented (2-way) toggle buttons, e.g. Pause/Play, Manual/Auto */
-.seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:11px}
-.seg button{padding:8px}
-.seg button.on{background:var(--ink);border-color:var(--ink);color:#000;font-weight:700}
-.seg button.act{border-color:var(--hot);color:var(--hot)}
-.seg button.act:hover{background:var(--hot);color:#000}
-
-/* file upload */
-.filebtn{position:relative;overflow:hidden;margin-bottom:9px}
-.filebtn input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
-.filebtn .name{display:block;margin-top:5px;color:var(--dim);font-size:10.5px;letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* File input: native control hidden behind a styled label. */
+.filebtn{
+  position:relative;display:grid;place-content:center;margin-top:var(--spacing-1);
+  height:calc(var(--line-height) * 2);cursor:pointer;
+}
+.filebtn:hover{background:var(--background-color-alt)}
+.filebtn button{border:0;height:auto;pointer-events:none;background:transparent}
+.filebtn input[type=file]{position:absolute;inset:0;width:100%;opacity:0;cursor:pointer}
+.filebtn .name{
+  position:absolute;left:0;right:0;top:calc(100% + var(--line-height) / 4);
+  color:var(--text-color-alt);font-size:.7rem;text-transform:uppercase;letter-spacing:.06ch;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.fld .filebtn{margin-bottom:var(--line-height)}
 
 /* palette swatches */
-.pal{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:11px}
-.sw{height:30px;border:1px solid var(--line);cursor:pointer;position:relative;overflow:hidden}
-.sw:hover{border-color:var(--ink)}
+.pal{display:grid;grid-template-columns:repeat(3,1fr);gap:1ch;margin-top:var(--spacing-1)}
+.sw{
+  height:calc(var(--line-height) * 1.5);border:var(--border-thickness) solid var(--text-color);
+  cursor:pointer;position:relative;overflow:hidden;
+}
+.sw:hover{outline:var(--border-thickness) solid var(--accent);outline-offset:2px}
 .sw i{position:absolute;top:0;bottom:0;width:33.34%}
 .sw i:nth-child(1){left:0}.sw i:nth-child(2){left:33.33%}.sw i:nth-child(3){left:66.66%}
 
-.toggle{display:flex;align-items:center;gap:8px;margin-bottom:9px;cursor:pointer;user-select:none}
-.toggle input{appearance:none;-webkit-appearance:none;width:26px;height:14px;background:var(--line);position:relative;cursor:pointer;flex:none;transition:.15s}
-.toggle input::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;background:var(--dim);transition:.15s}
-.toggle input:checked{background:var(--hot)}
-.toggle input:checked::after{left:14px;background:#000}
-.toggle span{color:var(--dim);font-size:11.5px;letter-spacing:.04em}
-.toggle.big{margin-bottom:12px}
-.toggle.big span{color:var(--ink);font-size:12px;font-weight:600;letter-spacing:.08em}
+/* ─── Checkbox ─────────────────────────────────────────────────────────────
+   Drawn as a character cell in the same 2px language rather than a pill,
+   and it fills with the accent when on, matching every other "this is live"
+   signal in the panel. */
+.toggle{display:flex;align-items:center;gap:1.5ch;margin-top:var(--spacing-1);cursor:pointer;user-select:none}
+.toggle input{
+  appearance:none;-webkit-appearance:none;flex:none;
+  width:var(--line-height);height:var(--line-height);
+  border:var(--border-thickness) solid var(--text-color);
+  background:var(--background-color);cursor:pointer;position:relative;
+}
+.toggle input:checked{background:var(--accent);border-color:var(--accent)}
+.toggle input:checked::after{
+  content:'';position:absolute;inset:0;
+  background:var(--accent-ink);
+  -webkit-mask:var(--tick) center / 68% no-repeat; mask:var(--tick) center / 68% no-repeat;
+  --tick:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='4' stroke-linecap='square'%3E%3Cpath d='M4 12l6 6L20 6'/%3E%3C/svg%3E");
+}
+.toggle span{color:var(--text-color);font-size:.78rem;letter-spacing:.04ch;font-weight:var(--font-weight-medium)}
+.toggle.big span{font-weight:var(--font-weight-bold);letter-spacing:.08ch}
 
 /* responsive: panel becomes a bottom drawer */
 @media (max-width:880px){
   body{grid-template-columns:1fr;grid-template-rows:1fr 46vh}
-  #panel{border-right:0;border-top:1px solid var(--line)}
-  #stage{padding:14px}
+  #panel{height:auto;border-right:0;border-top:var(--border-thickness) solid var(--text-color)}
+  #stage{padding:var(--spacing-1) 1ch}
 }
-#fatal{position:fixed;inset:0;display:none;place-items:center;background:#0a0a0b;color:var(--hot);
-  text-align:center;padding:40px;letter-spacing:.1em;z-index:99}
+#fatal{
+  position:fixed;inset:0;display:none;place-items:center;
+  background:var(--background-color);color:var(--accent);
+  text-align:center;padding:var(--spacing-2);letter-spacing:.1ch;z-index:99;
+  text-transform:uppercase;font-weight:var(--font-weight-bold);
+}
 </style>
 
 <div id="panel">
   <div class="brand">
-    <div><h1>RADIANT <span>BURNT</span></h1><p>GENERATIVE POSTER MAKER / v3.0</p></div>
-    <button id="resetBtn" type="button">↺ Reset</button>
+    <div class="brand-name">
+      <h1>RADIANT <span>BURNT</span></h1>
+      <p>GENERATIVE POSTER MAKER</p>
+    </div>
+    <div class="brand-actions">
+      <button id="themeBtn" type="button" title="Toggle light / dark">◐</button>
+      <button id="resetBtn" type="button">↺ Reset</button>
+    </div>
   </div>
   <form id="ui" autocomplete="off" onsubmit="return false"></form>
 </div>
@@ -2918,10 +3094,16 @@ function buildUI(){
   /* Every node below is about to be replaced, so anything holding one is
      now pointing at a detached element. */
   timelineInput = null; timelineVal = null; playSegButtons = [];
+  let secNo = 0;
   for (const sec of CONTROLS){
     const s = document.createElement('section');
     const h = document.createElement('h2');
-    h.textContent = sec.title;
+    /* Boxed running number, so a long scroll reads as a run of markers
+       rather than twenty near-identical rows of uppercase text. */
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = String(++secNo).padStart(2, '0');
+    h.append(num, document.createTextNode(sec.title));
     h.onclick = () => s.classList.toggle('closed');
     const body = document.createElement('div');
     body.className = 'body';
@@ -2939,7 +3121,7 @@ function buildUI(){
       else if (it.t === 'colors'){
         for (const [k, label] of it.keys){
           const row = document.createElement('div');
-          row.className = 'row';
+          row.className = 'row colorrow';
           row.innerHTML = `<label>${label}</label>`;
           const inp = document.createElement('input');
           inp.type = 'color'; inp.autocomplete = 'off'; inp.value = P[k];
@@ -3188,6 +3370,21 @@ const ACTIONS = {
   record: toggleRecord
 };
 document.getElementById('resetBtn').onclick = ACTIONS.reset;
+
+/* Dark is the default; the light tokens stay reachable from the header.
+   Stored per-browser so the choice survives a reload — wrapped because
+   storage throws outright in some privacy modes rather than no-opping. */
+const themeBtn = document.getElementById('themeBtn');
+function applyTheme(mode){
+  if (mode === 'light') document.documentElement.setAttribute('data-theme','light');
+  else document.documentElement.removeAttribute('data-theme');
+  try { localStorage.setItem('rb-theme', mode); } catch(e){}
+}
+themeBtn.onclick = () => {
+  const now = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  applyTheme(now);
+};
+try { if (localStorage.getItem('rb-theme') === 'light') applyTheme('light'); } catch(e){}
 
 /* ══════════════════════════════════════════════════════════════════════════
    9. BOOT
