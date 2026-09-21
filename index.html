@@ -211,6 +211,28 @@ section.closed .body{display:none}
 .body{padding:var(--spacing-1) 2ch var(--spacing-1-5); border-left:4px solid transparent}
 .body.dim>*:not(:first-child){opacity:.35;pointer-events:none;filter:saturate(0)}
 
+/* ─── About and licence ────────────────────────────────────────────────────
+   Pinned below the scrolling column, so it is reachable without scrolling
+   twenty sections. Capped and scrollable, because the panel is only ever
+   one viewport tall. */
+#aboutSec{flex:none;border-top:var(--border-thickness) solid var(--text-color);border-bottom:0}
+#aboutSec .body{max-height:38vh;overflow-y:auto}
+.about{margin:0}
+.about dt{
+  color:var(--text-color-alt); font-size:.72rem; text-transform:uppercase;
+  letter-spacing:.1ch; font-weight:var(--font-weight-medium);
+  margin-top:var(--spacing-half);
+}
+.about dt:first-child{margin-top:0}
+.about dd{margin:0; font-size:.8rem}
+.about a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.about a:hover{color:var(--text-color)}
+.about-note{
+  margin-top:var(--spacing-1); padding-top:var(--spacing-half);
+  border-top:1px solid var(--text-color-alt);
+  color:var(--text-color-alt); font-size:.72rem;
+}
+
 /* ─── Sliders ──────────────────────────────────────────────────────────────
    ASTA ships no range component; drawn here in the same language — a rule
    one border-thickness tall and a thumb that is a solid character cell. */
@@ -383,6 +405,25 @@ input[type=color]::-moz-color-swatch{border:0}
     </div>
   </div>
   <form id="ui" autocomplete="off" onsubmit="return false"></form>
+
+  <!-- Static, and outside #ui on purpose: buildUI() clears that form on
+       every rebuild, so anything written into it would not survive. -->
+  <section id="aboutSec" class="closed">
+    <h2><span class="num">&#9432;</span>About &amp; Licence</h2>
+    <div class="body">
+      <dl class="about">
+        <dt>Author</dt>
+        <dd>Mark Do</dd>
+        <dt>Contact</dt>
+        <dd><a href="mailto:dtcmark@gmail.com">dtcmark@gmail.com</a></dd>
+        <dt>Personal use</dt>
+        <dd>Free. Use this tool, and the posters you make with it, for personal, study and other non commercial work. No permission needed.</dd>
+        <dt>Commercial use</dt>
+        <dd>Ask first. Client, brand, resale and any other paid work needs written permission: <a href="mailto:dtcmark@gmail.com?subject=Commercial%20use%20request">request a licence</a>.</dd>
+      </dl>
+      <p class="about-note">&copy; 2026 Mark Do. Provided as is, with no warranty.</p>
+    </div>
+  </section>
 </div>
 
 <div id="stage">
@@ -3370,6 +3411,13 @@ const ACTIONS = {
   record: toggleRecord
 };
 document.getElementById('resetBtn').onclick = ACTIONS.reset;
+
+/* The generated sections get their handler in buildUI(); this one is static
+   markup, so it wires its own. */
+{
+  const aboutSec = document.getElementById('aboutSec');
+  aboutSec.querySelector('h2').onclick = () => aboutSec.classList.toggle('closed');
+}
 
 /* Dark is the default; the light tokens stay reachable from the header.
    Stored per-browser so the choice survives a reload — wrapped because
